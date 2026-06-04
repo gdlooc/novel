@@ -1,0 +1,40 @@
+# === Node.js ===
+node_modules/
+dist/
+*.tsbuildinfo
+
+# === Vite ===
+.vite/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# === 爬虫输出（爬取的小说数据，非源码）===
+crawler/output/
+crawler/novels/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === 系统文件 ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === 环境变量 ===
+.env
+.env.local
+.env.*.local
+
+# === Claude Code ===
+.claude/settings.local.json
+
+# === 日志 ===
+*.log

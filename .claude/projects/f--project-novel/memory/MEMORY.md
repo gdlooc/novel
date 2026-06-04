@@ -1,0 +1,1 @@
+- [简体中文规范](chinese-language-preference.md) — 项目强制使用简体中文进行聊天回复、思考过程和代码注释

@@ -1,0 +1,12 @@
+export { ReaderShell } from './components/ReaderShell';
+export { CanvasViewport } from './components/CanvasViewport';
+export { TouchLayer } from './components/TouchLayer';
+export { useReader } from './hooks/useReader';
+export { useCanvasResize } from './hooks/useCanvasResize';
+export { usePageTurn } from './hooks/usePageTurn';
+export { useKeyboardNav } from './hooks/useKeyboardNav';
+export { useGestureDetector } from './gestures/useGestureDetector';
+export type { CanvasViewportHandle } from './components/CanvasViewport';
+export type { CanvasDimensions } from './hooks/useCanvasResize';
+export type { PageTurnResult } from './hooks/usePageTurn';
+export type { TapZone, GestureEvent, GestureConfig, GestureType } from './gestures/types';
