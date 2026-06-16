@@ -73,6 +73,8 @@ export interface ChapterNav {
   getNext: (chapterId: string) => TocEntry | undefined;
   /** Get the previous chapter */
   getPrev: (chapterId: string) => TocEntry | undefined;
+  /** 根据章节 ID 查找所属分卷名称 */
+  getVolumeName: (chapterId: string) => string | undefined;
   /** Total chapter count */
   totalChapters: number;
 }

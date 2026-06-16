@@ -1,8 +1,30 @@
 /**
- * Dynamic font loading via the FontFace API.
+ * 动态字体加载 — 通过 FontFace API 管理 Web 字体。
  *
- * Allows the reader to load custom fonts (e.g., from Google Fonts or
- * local assets) and ensure they're ready before layout.
+ * ## 为什么需要字体加载管理
+ *
+ * Canvas measureText 的准确度依赖于字体是否已加载。
+ * 若排版在字体加载前执行，测量宽度可能与实际渲染宽度不同，
+ * 导致断行位置错误、文字溢出或显示异常。
+ *
+ * 本模块确保：
+ * 1. 排版前字体已就绪（FontFaceSet.ready）
+ * 2. 提供 CJK 字体的系统默认回退链（font stack）
+ * 3. 检测系统已安装的字体（用于字体选择器的显示）
+ *
+ * ## CJK 字体回退链
+ *
+ * 每个 FontOption 中的 fontFamily 都是完整的 CSS font stack：
+ * ```
+ * "Noto Serif CJK SC",  ← 首选：Google/Adobe 开源宋体
+ * "Source Han Serif SC", ← 二选：思源宋体（同源不同名）
+ * "Songti SC",           ← 三选：macOS 系统宋体
+ * "SimSun",              ← 四选：Windows 中易宋体
+ * serif                  ← 最终回退：浏览器默认衬线体
+ * ```
+ *
+ * 这种设计确保了跨平台一致的阅读体验，
+ * 即使某个字体不可用也能降级到系统默认字体。
  */
 
 /** Font definition for the font picker */

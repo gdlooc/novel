@@ -3,69 +3,70 @@
 串联完整的小说爬取流程:
   book页 → 目录页 → 章节列表 → 遍历下载 → 保存
 
+所有页面抓取均使用 Playwright 无头浏览器（绕过 Cloudflare）。
+
 功能:
 - 支持断点续爬（跳过已下载章节）
 - 请求间隔控制（防止触发限流）
 - 失败自动重试
 - 进度实时显示
+- 自动登录（支持账密或 Cookie 两种方式）
 
 用法:
+  python scraper.py --aid 1973 --username 826839099 --password ty1235556
   python scraper.py --aid 1973 --cookie "..."
-  python scraper.py --aid 1973 --cookie "..." --resume
-  python scraper.py --book-url https://www.wenku8.net/book/1973.htm --cookie "..."
+  python scraper.py --aid 1973 --resume
+  python scraper.py --book-url https://www.wenku8.net/book/1973.htm
 """
 
 import argparse
 import asyncio
 import json
 import os
+import random
 import re
 import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+# 第三方库
+import requests as http_requests  # 仅用于图片下载（CDN 无 Cloudflare 防护）
+
 # 导入项目内模块
-from cookie_utils import parse_cookie_string
-from fetcher import RequestsFetcher, PlaywrightFetcher, FetchResult
+from auth import resolve_cookies
+from fetcher import PlaywrightFetcher
 from parser_catalog import parse_catalog_html
 from parser_chapter import parse_chapter_html
 from parser_book import parse_book_html
 
 
-# ==================== 默认 Cookie ====================
-# 如命令行不提供 --cookie，则使用此默认值
-DEFAULT_COOKIES = "Hm_lvt_d72896ddbf8d27c750e3b365ea2fc902=1780045405,1780120108; HMACCOUNT=99CC7C9A5CC60B0C; _clck=t66ie%5E2%5Eg6h%5E0%5E2309; PHPSESSID=ba61ae6f8503fddca840632945d1d200; Hm_lvt_acfbfe93830e0272a88e1cc73d4d6d0f=1780125303; jieqiUserInfo=jieqiUserId%3D1134285%2CjieqiUserName%3D826839099%2CjieqiUserGroup%3D3%2CjieqiUserVip%3D0%2CjieqiUserPassword%3D2ea565d734f685316cb5e840a9a46f75%2CjieqiUserName_un%3D826839099%2CjieqiUserHonor_un%3D%26%23x666E%3B%26%23x901A%3B%26%23x4F1A%3B%26%23x5458%3B%2CjieqiUserGroupName_un%3D%26%23x666E%3B%26%23x901A%3B%26%23x4F1A%3B%26%23x5458%3B%2CjieqiUserLogin%3D1780141276; jieqiVisitInfo=jieqiUserLogin%3D1780141276%2CjieqiUserId%3D1134285; cf_clearance=g3uY8odL5slxQxj6rcsYeYkbJFmgpm8t7vJB3hreBmk-1780141278-1.2.1.1-qFqSHjdmALC0ViXKi2sFVFEyepsIX1qExCMMQEaBn7_Nxnlw9MfXSTNfdaCwGzFiN8Y24lEMXQWnmxUpWyjjBL3MqVqQH8gYlNJDPXw2NUkVOo9RZu5vs_HRPl7qJRJ0GBCuK8sYGDyR_qpuS5LcoQJ3iB9RlfU8.vUJiOz5SrxPvFUQzsYJUDpZJ_z8k4Ly0qSGWYh44o0IDI3zG3yHiu6tlkBcUGFqCUp_sNKC.285QGzywACaXQjzklZPzyH1xtVSupFBD9drXEFQNuKE5M2yvZQKRjRvFkh2ZkpT5_WzWeq.2TKD6x2WKgbtRSNQ2ylQnU_1HvFhuYEK2VpIaA; jieqiVisitTime=jieqiArticlesearchTime%3D1780141296; jieqiVisitId=article_articleviews%3D3057; _clsk=10zhujm%5E1780141298962%5E3%5E1%5Ev.clarity.ms%2Fcollect; Hm_lpvt_d72896ddbf8d27c750e3b365ea2fc902=1780141577; Hm_lpvt_acfbfe93830e0272a88e1cc73d4d6d0f=1780141577"
-
-
 # ==================== 爬取配置 ====================
 
 class ScraperConfig:
-    """爬取配置"""
+    """爬取配置（所有页面均使用 Playwright 抓取）"""
+
     def __init__(
         self,
         aid: int,
         output_dir: str = "novels",
         delay_seconds: float = 2.0,
         max_retries: int = 3,
-        browser_mode: bool = False,
-        timeout: int = 30,
+        timeout: int = 60,
     ):
         """
         Args:
             aid: 小说 ID
             output_dir: 输出根目录
-            delay_seconds: 章节间请求间隔（秒），可浮点数
+            delay_seconds: 章节间请求间隔（秒）
             max_retries: 每个章节下载失败后的最大重试次数
-            browser_mode: 是否使用无头浏览器模式（遇到 Cloudflare 时使用）
             timeout: 每个请求超时秒数
         """
         self.aid = aid
-        self.group = aid // 1000                      # URL 中的 group 参数
+        self.group = aid // 1000
         self.output_dir = Path(output_dir)
         self.delay_seconds = delay_seconds
         self.max_retries = max_retries
-        self.browser_mode = browser_mode
         self.timeout = timeout
 
     @property
@@ -90,7 +91,7 @@ class ScraperConfig:
 
     @property
     def checkpoint_file(self) -> Path:
-        """断点文件路径（记录已完成的 cid 列表）"""
+        """断点文件路径"""
         return self.novel_dir / ".checkpoint.json"
 
 
@@ -104,14 +105,7 @@ class NovelScraper:
     2. 逐个下载章节正文
     3. 保存元数据 + 章节数据
     4. 维护断点文件，支持续爬
-
-    使用示例:
-        scraper = NovelScraper(config, cookies, fetcher)
-        scraper.run()
     """
-
-    # 目录页 URL 模板
-    CATALOG_URL = "https://www.wenku8.net/novel/{group}/{aid}/index.htm"
 
     def __init__(
         self,
@@ -130,11 +124,11 @@ class NovelScraper:
         self.config.novel_dir.mkdir(parents=True, exist_ok=True)
 
         # 状态追踪
-        self._completed_cids: set = set()    # 已完成的章节 cid
-        self._failed_cids: List[int] = []    # 失败的章节 cid
-        self._catalog_data: Dict = {}         # 目录解析结果
-        self._book_data: Dict = {}            # 书页解析结果
-        self._novel_title: str = ""           # 小说名
+        self._completed_cids: set = set()
+        self._failed_cids: List[int] = []
+        self._catalog_data: Dict = {}
+        self._book_data: Dict = {}
+        self._novel_title: str = ""
 
         # 加载断点
         self._load_checkpoint()
@@ -145,8 +139,8 @@ class NovelScraper:
         """执行完整爬取流程
 
         流程:
-        1. 下载目录页 → 解析章节列表
-        2. 如果之前已完成部分章节 → 跳过
+        1. 下载书页 → 解析元数据
+        2. 下载目录页 → 解析章节列表
         3. 遍历剩余章节 → 下载并解析
         4. 保存元数据
         """
@@ -169,7 +163,6 @@ class NovelScraper:
             print(f"  状态: {self._book_data.get('status', '?')}")
             print(f"  字数: {self._book_data.get('word_count', '?')}")
         else:
-            # 书页下载失败不阻塞流程，目录页还有基础信息
             self._book_data = {}
             print("  [!] 书页获取失败，将使用目录页信息")
         print()
@@ -181,19 +174,15 @@ class NovelScraper:
             print("[X] 无法获取目录页，终止")
             return False
 
-        # 解析目录
         self._catalog_data = parse_catalog_html(
             catalog_html, self.config.catalog_url
         )
-        # 如果书页失败，用目录页信息兜底
         if not self._novel_title:
             self._novel_title = self._catalog_data.get("title", f"aid_{self.config.aid}")
 
-        # 展平章节列表（去卷结构，方便逐个处理）
         all_chapters = self._flatten_chapters(self._catalog_data)
         print(f"  总章节: {len(all_chapters)}")
 
-        # 过滤掉已完成的章节
         pending = [
             ch for ch in all_chapters
             if ch["cid"] not in self._completed_cids
@@ -223,45 +212,50 @@ class NovelScraper:
     # ---------- 私有方法：获取页面 ----------
 
     def _fetch_page(self, url: str, retries: int = None) -> Optional[str]:
-        """下载页面 HTML，支持重试
+        """使用 Playwright 下载页面 HTML，支持重试
 
         Args:
             url: 页面 URL
-            retries: 剩余重试次数（None 则使用配置值）
+            retries: 剩余重试次数
 
         Returns:
-            页面 HTML 字符串（GBK解码后的unicode），失败返回 None
+            页面 HTML 字符串，失败返回 None
         """
         if retries is None:
             retries = self.config.max_retries
 
         for attempt in range(retries + 1):
             try:
-                if self.config.browser_mode:
-                    return self._fetch_with_browser(url)
+                fetcher = PlaywrightFetcher(
+                    cookies=self.cookies,
+                    timeout=self.config.timeout,
+                )
+                result = asyncio.run(fetcher.fetch(url))
+                if result.status_code == 200:
+                    return result.html
+                elif result.status_code == 403:
+                    # Cloudflare 拦截
+                    print(f"\n  [!] 被 Cloudflare 拦截 (403): {url[-60:]}")
+                    if attempt < retries:
+                        wait = 2 ** attempt
+                        print(f"  [!] 重试 ({attempt+1}/{retries})，{wait}s后...")
+                        time.sleep(wait)
+                    continue
                 else:
-                    return self._fetch_with_requests(url)
+                    # 其他 HTTP 错误
+                    if attempt < retries:
+                        wait = 2 ** attempt
+                        time.sleep(wait)
+                    continue
             except Exception as e:
                 if attempt < retries:
-                    wait = 2 ** attempt  # 指数退避: 1s, 2s, 4s
-                    print(f"  [!] 重试 ({attempt+1}/{retries})，{wait}s后重试: {url[-60:]}")
+                    wait = 2 ** attempt
+                    print(f"\n  [!] 重试 ({attempt+1}/{retries})，{wait}s后: {url[-60:]}")
                     time.sleep(wait)
                 else:
-                    print(f"  [X] 下载失败: {url[-60:]} - {e}")
+                    print(f"\n  [X] 下载失败: {url[-60:]} - {e}")
                     return None
-
-    def _fetch_with_requests(self, url: str) -> str:
-        """使用 requests 下载页面"""
-        fetcher = RequestsFetcher(cookies=self.cookies, timeout=self.config.timeout)
-        result = fetcher.fetch(url)
-        # 注意: 网站编码为 GBK，requests 会自动处理 apparent_encoding
-        return result.html
-
-    def _fetch_with_browser(self, url: str) -> str:
-        """使用无头浏览器下载页面"""
-        fetcher = PlaywrightFetcher(cookies=self.cookies, timeout=self.config.timeout)
-        result = asyncio.run(fetcher.fetch(url))
-        return result.html
+        return None
 
     # ---------- 私有方法：章节下载 ----------
 
@@ -269,7 +263,7 @@ class NovelScraper:
         """逐个下载章节，带进度显示和断点保存
 
         Args:
-            chapters: 待下载的章节列表 [{"cid": ..., "title": ..., "url": ...}, ...]
+            chapters: 待下载的章节列表
         """
         total = len(chapters)
         start_time = time.time()
@@ -305,12 +299,10 @@ class NovelScraper:
                 print("  [空内容]")
                 continue
 
-            # 下载插图（如有）
+            # 下载插图
             images_info = []
             if has_images:
                 images_info = self._download_images(chapter_data, cid)
-                downloaded = sum(1 for i in images_info if i["downloaded"])
-                # 更新 chapter_data 中的图片信息（加入本地路径）
                 chapter_data["images"] = images_info
 
             # 保存章节
@@ -318,39 +310,36 @@ class NovelScraper:
             self._completed_cids.add(cid)
             self._save_checkpoint()
 
-            # 请求间隔
+            # 请求间隔（加随机抖动）
             if i < total:
                 wait = self.config.delay_seconds
-                # 添加随机抖动 ±0.5s
-                import random
                 wait += random.uniform(-0.5, 0.5)
                 wait = max(0.5, wait)
                 time.sleep(wait)
 
-            # 进度显示
+            # 进度详情
             img_str = ""
             if images_info:
-                img_str = f" {sum(1 for i in images_info if i['downloaded'])}/{len(images_info)}图 "
+                downloaded = sum(1 for x in images_info if x["downloaded"])
+                img_str = f" {downloaded}/{len(images_info)}图 "
             print(f"  [{img_str}{len(content)}字]")
 
     # ---------- 私有方法：图片下载 ----------
 
     def _download_images(self, chapter_data: Dict, cid: int) -> List[Dict]:
-        """下载章节插图到本地
+        """下载章节插图到本地（使用 requests，CDN 无 Cloudflare）
 
         Args:
             chapter_data: 章节解析结果（含 images 字段）
             cid: 章节 ID
 
         Returns:
-            [{"url": "...", "filename": "...", "local_path": "...",
-              "downloaded": True/False}, ...]
+            [{"url": "...", "filename": "...", "local_path": "...", "downloaded": bool}, ...]
         """
         images = chapter_data.get("images", [])
         if not images:
             return []
 
-        # 创建图片目录
         images_dir = self.config.novel_dir / "images" / str(cid)
         images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -366,20 +355,15 @@ class NovelScraper:
                 "downloaded": False,
             }
 
-            # 跳过已下载的图片
+            # 跳过已下载
             if local_path.exists():
                 result["downloaded"] = True
                 results.append(result)
                 continue
 
-            # 下载图片
+            # 下载图片（图片 CDN 无 Cloudflare，用 requests 即可）
             try:
-                fetcher = RequestsFetcher(
-                    cookies=self.cookies,
-                    timeout=self.config.timeout,
-                )
-                # 图片需要获取原始字节，不能用 text 模式
-                resp = fetcher.session.get(url, timeout=self.config.timeout)
+                resp = http_requests.get(url, timeout=self.config.timeout)
                 if resp.status_code == 200:
                     local_path.write_bytes(resp.content)
                     result["downloaded"] = True
@@ -395,33 +379,23 @@ class NovelScraper:
     # ---------- 私有方法：保存 ----------
 
     def _save_chapter(self, cid: int, chapter_data: Dict, images_info: List[Dict] = None):
-        """保存单章为文本文件和 JSON 文件
-
-        目录结构:
-        novels/aid_1973/
-          chapters/
-            {cid}.txt         ← 章节正文（纯文本，含 [插图: ...] 标记）
-            {cid}.json        ← 章节完整数据（含图片元数据）
-            {cid}_images.json ← 图片下载记录
-          images/{cid}/       ← 已下载的图片文件
-          chapters.json       ← 章节列表（只含元数据，不含正文）
-        """
+        """保存单章为文本和 JSON 文件"""
         chapters_dir = self.config.novel_dir / "chapters"
         chapters_dir.mkdir(parents=True, exist_ok=True)
 
-        # 保存纯文本（标题 + 正文）
+        # 文本文件
         txt_path = chapters_dir / f"{cid}.txt"
         txt_content = chapter_data["title"] + "\n\n" + chapter_data["content"]
         txt_path.write_text(txt_content, encoding="utf-8")
 
-        # 保存 JSON（含完整元数据）
+        # JSON 元数据
         json_path = chapters_dir / f"{cid}.json"
         json_path.write_text(
             json.dumps(chapter_data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-        # 保存图片元数据（如果有图片）
+        # 图片元数据
         if images_info:
             images_json_path = chapters_dir / f"{cid}_images.json"
             images_json_path.write_text(
@@ -430,13 +404,7 @@ class NovelScraper:
             )
 
     def _save_metadata(self, all_chapters: List[Dict]):
-        """保存小说元数据
-
-        生成文件:
-        - metadata.json: 书名、作者、aid、章节数、统计信息
-        - chapters.json: 章节列表（不含正文，含 url）
-        """
-        # 元数据（优先用书页数据，兜底用目录页数据）
+        """保存小说元数据和章节列表"""
         metadata = {
             "aid": self.config.aid,
             "title": self._novel_title,
@@ -511,14 +479,7 @@ class NovelScraper:
 
     @staticmethod
     def _flatten_chapters(catalog: Dict) -> List[Dict]:
-        """将分卷的章节列表展平为一维列表
-
-        Args:
-            catalog: 目录解析结果
-
-        Returns:
-            [{"cid": 69567, "title": "KEYWORDS", "url": "...", "volume": "第一卷"}, ...]
-        """
+        """将分卷的章节列表展平为一维列表"""
         all_chapters = []
         for vol in catalog.get("volumes", []):
             vol_name = vol.get("name", "")
@@ -546,7 +507,7 @@ class NovelScraper:
         print(f"  总章节: {len(all_chapters)}")
         print(f"  已完成: {len(self._completed_cids)}")
         if self._failed_cids:
-            print(f"  失败: {len(self._failed_cids)} → {self._failed_cids}")
+            print(f"  失败: {len(self._failed_cids)} -> {self._failed_cids}")
         print(f"  输出: {self.config.novel_dir}")
         print(f"{'='*60}")
 
@@ -559,25 +520,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python scraper.py --aid 1973
+  python scraper.py --aid 1973 --username 826839099 --password ty1235556
   python scraper.py --aid 1973 --cookie "key=value"
-  python scraper.py --aid 1973 --resume                     # 断点续爬
-  python scraper.py --aid 1973 --browser --delay 3.0        # 浏览器模式, 3秒间隔
+  python scraper.py --aid 1973 --resume
   python scraper.py --book-url https://www.wenku8.net/book/1973.htm
         """,
     )
     # 目标参数
     parser.add_argument("--aid", type=int, default=0, help="小说 ID")
     parser.add_argument("--book-url", default="", help="小说书页 URL（自动提取 aid）")
-    # Cookie
-    parser.add_argument("--cookie", "-c", default="", help="Cookie 字符串")
+    # 认证参数
+    auth_group = parser.add_argument_group("认证方式")
+    auth_group.add_argument("--username", "-u", default="", help="用户名")
+    auth_group.add_argument("--password", "-p", default="", help="密码")
+    auth_group.add_argument("--cookie", "-c", default="", help="Cookie 字符串（可选，优先使用）")
     # 爬取选项
     parser.add_argument("--output-dir", "-o", default="novels", help="输出目录")
     parser.add_argument("--delay", "-d", type=float, default=2.0, help="章节间延时秒数")
     parser.add_argument("--retries", "-r", type=int, default=3, help="失败重试次数")
-    parser.add_argument("--timeout", "-t", type=int, default=30, help="请求超时秒数")
-    # 模式
-    parser.add_argument("--browser", "-b", action="store_true", help="使用无头浏览器模式")
+    parser.add_argument("--timeout", "-t", type=int, default=60, help="请求超时秒数")
     parser.add_argument("--resume", action="store_true", help="断点续爬")
 
     args = parser.parse_args()
@@ -593,10 +554,17 @@ def main():
         print("\n[!] 请提供 --aid 或 --book-url")
         sys.exit(1)
 
-    # --- Cookie ---
-    cookies = parse_cookie_string(args.cookie or DEFAULT_COOKIES)
+    # --- 认证：获取 cookies ---
+    cookies = resolve_cookies(
+        username=args.username,
+        password=args.password,
+        cookie_string=args.cookie,
+    )
     if cookies:
-        print(f"[*] 已解析 {len(cookies)} 个 cookie")
+        print(f"[*] 已获取 {len(cookies)} 个 cookie")
+    else:
+        print("[!] 警告: 未获取到登录凭证，部分页面可能无法访问")
+        cookies = {}
 
     # --- 配置 ---
     config = ScraperConfig(
@@ -604,7 +572,6 @@ def main():
         output_dir=args.output_dir,
         delay_seconds=args.delay,
         max_retries=args.retries,
-        browser_mode=args.browser,
         timeout=args.timeout,
     )
 

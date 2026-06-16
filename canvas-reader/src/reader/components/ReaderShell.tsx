@@ -27,6 +27,8 @@ import { useKeyboardNav } from '../hooks/useKeyboardNav';
 import { CanvasRenderer } from '@engine/render/CanvasRenderer';
 import type { PageTurnAnimationType } from '@engine/render/CanvasRenderer';
 import { getThemeById, applyThemeToDOM } from '@engine/render/ThemeApplicator';
+import { hashLayoutConfig } from '@engine/layout/Paginator';
+import type { TextLine } from '@engine/layout/types';
 
 import type { BookSource } from '@book/types';
 import type { TapZone } from '../gestures/types';
@@ -186,32 +188,62 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
     }
   }, [store.currentPage, store.nextPage, settings.readingMode]);
 
-  // 滚动模式渲染
+  // 滚动模式：排版完成后恢复上次滚动位置
+  useEffect(() => {
+    if (settings.readingMode !== 'scroll') return;
+    const pending = store.pendingScrollRestore;
+    if (pending === null) return;
+    if (scrollContentHeight === 0) return; // 内容高度尚未计算
+
+    // 内容就绪后恢复到保存的滚动位置
+    const viewportHeight = canvasDims?.cssHeight || 600;
+    const maxOffset = Math.max(0, scrollContentHeight - viewportHeight);
+    const clamped = Math.max(0, Math.min(maxOffset, pending));
+    setScrollOffset(clamped);
+    scrollOffsetRef.current = clamped;
+    // 清除待恢复标记
+    store.setPendingScrollRestore(null);
+  }, [settings.readingMode, store.pendingScrollRestore, scrollContentHeight]);
+
+  // 滚动模式渲染（RAF 合并，避免单帧内多次重绘）
   useEffect(() => {
     if (settings.readingMode !== 'scroll') return;
     const renderer = rendererRef.current;
     if (!renderer || !canvasDims) return;
     if (store.status !== 'ready') return;
 
-    const lines = layoutEngineRef.current.getAllLines();
-    if (lines.length === 0) return;
+    // 使用 requestAnimationFrame 合并渲染：
+    // scrollOffset 可能在同一个 16ms 帧内被多次更新（如触控板高频率滚动），
+    // 取消上次未执行的 RAF，只保留最新的一次，确保每帧最多绘制一次。
+    const rafId = requestAnimationFrame(() => {
+      const lines = layoutEngineRef.current.getAllLines();
+      if (lines.length === 0) return;
 
-    const config = settings.getLayoutConfig(canvasDims.cssWidth, canvasDims.cssHeight);
-    const totalHeight = renderer.renderScrollContent(
-      lines,
-      config,
-      scrollOffset,
-      store.chapterTitle || undefined,
-    );
-    setScrollContentHeight(totalHeight);
+      const config = settings.getLayoutConfig(canvasDims.cssWidth, canvasDims.cssHeight);
+      // 从 ref 读取最新值，避免闭包中 scrollOffset 陈旧
+      const offset = scrollOffsetRef.current;
+      const totalHeight = renderer.renderScrollContent(
+        lines,
+        config,
+        offset,
+        store.chapterTitle || undefined,
+      );
+
+      if (totalHeight !== scrollStateRef.current.contentHeight) {
+        scrollStateRef.current.contentHeight = totalHeight;
+        setScrollContentHeight(totalHeight);
+      }
+    });
+
+    return () => cancelAnimationFrame(rafId);
   }, [
     store.status,
     store.chapterTitle,
-    scrollOffset,
+    scrollOffset, // React 状态变更触发 effect，但实际值从 ref 读取
     settings.readingMode,
     canvasDims,
     store.chapterId,
-    store.layoutVersion, // 每次排版递增，确保字号等变化后重渲染
+    store.layoutVersion,
   ]);
 
   // Handle settings changes → re-layout
@@ -276,9 +308,52 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
     onSettingsChanged();
   }, [canvasDims?.cssWidth, canvasDims?.cssHeight]);
 
+  /**
+   * 保存滚动模式阅读进度。
+   * 从当前 scrollOffset 计算对应的 charOffset（布局无关），
+   * 同时保存视觉位置和排版配置哈希用于快速恢复。
+   */
+  const saveScrollProgress = useCallback(() => {
+    const s = useReaderStore.getState();
+    if (!s.bookMetadata || !s.chapterId) return;
+
+    // 计算当前滚动位置对应的字符偏移量
+    const lines = layoutEngineRef.current.getAllLines();
+    let charOffset = 0;
+    if (lines.length > 0 && canvasDims) {
+      const config = settings.getLayoutConfig(canvasDims.cssWidth, canvasDims.cssHeight);
+      const lineHeight = config.fontSize * config.lineHeight;
+      // 查找滚动位置处第一个可见行
+      for (const line of lines) {
+        const lineY = line.y + config.paddingTop;
+        if (lineY + lineHeight >= scrollOffsetRef.current) {
+          charOffset = line.charRange[0];
+          break;
+        }
+      }
+      // 兜底：使用最后一行的结束位置
+      if (charOffset === 0 && lines.length > 0) {
+        charOffset = lines[lines.length - 1].charRange[0];
+      }
+
+      import('@/services/storage/ProgressCache').then(({ saveReadingProgress }) => {
+        saveReadingProgress({
+          bookId: s.bookMetadata!.bookId,
+          chapterId: s.chapterId!,
+          pageIndex: 0,
+          charOffset,
+          scrollOffset: scrollOffsetRef.current,
+          layoutConfigHash: hashLayoutConfig(config),
+          updatedAt: Date.now(),
+        });
+      }).catch(() => {/* 静默 */});
+    }
+  }, [canvasDims, settings]);
+
   // ─── 滚动模式：连续滚动回调（始终弹性过卷）───
   const handleScrollMove = useCallback(
     (deltaY: number) => {
+      // 取消任何进行中的回弹/惯量动画，由手指拖动接管
       if (momentumAnimRef.current) {
         cancelAnimationFrame(momentumAnimRef.current);
         momentumAnimRef.current = 0;
@@ -286,16 +361,42 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
       setScrollOffset((prev) => {
         const { contentHeight, viewportHeight } = scrollStateRef.current;
         const maxOffset = Math.max(0, contentHeight - viewportHeight);
+        // 过卷弹性系数：值越小阻尼越大，0.25 表示位移降为 25%
+        const ELASTIC = 0.25;
+
+        // ── 关键修复：过卷中往回移动时也保持弹性 ──
+        // 不能用 proposed 来判断，因为往回移动时 proposed 仍在过卷区间
+        // 但 deltaY 方向相反，会导致两个 if 都不成立 → 直接 clamp → 瞬间回弹。
+        //
+        // 正确做法：检查当前位置（prev）是否在过卷状态。
+        // 如果在，往回移动也应用弹性系数，直到回到正常范围。
+
+        // 已在顶部过卷中（prev < 0），手指任意方向都弹性处理
+        if (prev < 0) {
+          const newPos = prev + deltaY * ELASTIC;
+          // 一旦回到正常范围（≥0）就停在边界，不再弹性
+          return newPos > 0 ? 0 : newPos;
+        }
+
+        // 已在底部过卷中（prev > maxOffset）
+        if (maxOffset > 0 && prev > maxOffset) {
+          const newPos = prev + deltaY * ELASTIC;
+          return newPos < maxOffset ? maxOffset : newPos;
+        }
+
+        // ── 正常范围内 → 检查是否开始进入过卷 ──
         const proposed = prev + deltaY;
 
-        // 始终允许橡皮筋过卷（30% 位移）
-        if (proposed < 0 && deltaY < 0) {
-          return prev + deltaY * 0.2;
+        // 向上拖拽超出顶部 → 开始弹性过卷
+        if (proposed < 0) {
+          return prev + deltaY * ELASTIC;
         }
-        if (maxOffset > 0 && proposed > maxOffset && deltaY > 0) {
-          return prev + deltaY * 0.2;
+        // 向下拖拽超出底部 → 开始弹性过卷
+        if (maxOffset > 0 && proposed > maxOffset) {
+          return prev + deltaY * ELASTIC;
         }
 
+        // 正常范围内的滚动，1:1 跟随手指
         return Math.max(0, Math.min(maxOffset, proposed));
       });
     },
@@ -354,7 +455,7 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
     (velocityY: number) => {
       const { contentHeight, viewportHeight } = scrollStateRef.current;
       const maxOffset = Math.max(0, contentHeight - viewportHeight);
-      const OVERSCROLL_THRESHOLD = 80; // 超过此阈值切换章节
+      const OVERSCROLL_THRESHOLD = 45; // 超过此阈值切换章节
       const SWITCH_VELOCITY = 0.15;
 
       const currentOffset = scrollOffsetRef.current;
@@ -396,6 +497,8 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
       }
 
       // 正常范围内 → 惯量滚动
+      saveScrollProgress(); // 滚动停止时保存进度
+
       const minVelocity = 0.05;
       if (Math.abs(velocityY) < minVelocity) return;
 
@@ -431,7 +534,7 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
 
       momentumAnimRef.current = requestAnimationFrame(animate);
     },
-    [switchToPrevChapter, switchToNextChapter, springBackTo],
+    [switchToPrevChapter, switchToNextChapter, springBackTo, saveScrollProgress],
   );
 
   // ─── Gesture handling ───
@@ -537,17 +640,31 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
       setScrollOffset((prev) => {
         const { contentHeight, viewportHeight } = scrollStateRef.current;
         const maxOffset = Math.max(0, contentHeight - viewportHeight);
+        // 过卷弹性系数（与手指拖动保持一致）
+        const ELASTIC = 0.25;
+
+        // ── 已在过卷中，任意方向都用弹性 ──
+        // 避免往回滚动时瞬间回弹（与 handleScrollMove 相同修复）
+        if (prev < 0) {
+          const newPos = prev + scrollDelta * ELASTIC;
+          return newPos > 0 ? 0 : newPos;
+        }
+        if (maxOffset > 0 && prev > maxOffset) {
+          const newPos = prev + scrollDelta * ELASTIC;
+          return newPos < maxOffset ? maxOffset : newPos;
+        }
+
+        // ── 正常范围内 → 检查是否开始过卷 ──
         const proposed = prev + scrollDelta;
 
-        // 始终弹性过卷
-        if (proposed < 0 && scrollDelta < 0) return prev + scrollDelta * 0.2;
-        if (maxOffset > 0 && proposed > maxOffset && scrollDelta > 0) return prev + scrollDelta * 0.2;
+        if (proposed < 0) return prev + scrollDelta * ELASTIC;
+        if (maxOffset > 0 && proposed > maxOffset) return prev + scrollDelta * ELASTIC;
 
         return Math.max(0, Math.min(maxOffset, proposed));
       });
 
       // 150ms 无滚轮事件 → 检查过卷状态
-      const OVERSCROLL_THRESHOLD = 80;
+      const OVERSCROLL_THRESHOLD = 45;
       wheelEndTimer = setTimeout(() => {
         const { contentHeight, viewportHeight } = scrollStateRef.current;
         const maxOffset = Math.max(0, contentHeight - viewportHeight);
@@ -561,6 +678,9 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
           springBackTo(currentOffset, 0);
         } else if (currentOffset > maxOffset) {
           springBackTo(currentOffset, maxOffset);
+        } else {
+          // 正常范围内滚动停止，保存进度
+          saveScrollProgress();
         }
       }, 150);
     };
@@ -655,7 +775,7 @@ export const ReaderShell: React.FC<ReaderShellProps> = ({
 
 {/* 过卷区域提示：显示在拉伸的空白区域 */}
       {settings.readingMode === 'scroll' && (() => {
-        const OVERSCROLL_THRESHOLD = 80;
+        const OVERSCROLL_THRESHOLD = 45;
         const { contentHeight, viewportHeight } = scrollStateRef.current;
         const maxOffset = Math.max(0, contentHeight - viewportHeight);
         const hasPrev = !!chapterNavRef.current?.getPrev(chapterIdRef.current || '');
@@ -778,7 +898,7 @@ const fullScreenCenter: React.CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   zIndex: 300,
-  background: 'inherit',
+  background: 'rgba(0, 0, 0, 0.45)',
 };
 
 const buttonStyle: React.CSSProperties = {

@@ -1,10 +1,25 @@
 /**
- * PageCacheManager — In-memory LRU page cache.
+ * PageCacheManager — 内存 LRU（最近最少使用）页面缓存。
  *
- * Caches PageDescriptor objects for fast page flipping.
- * Evicts least-recently-used pages when the cache exceeds capacity.
+ * ## 在缓存体系中的位置
  *
- * This is the L1 cache (fastest, in-memory). L2 is IndexedDB (see ChapterCacheDB).
+ * 三级缓存架构：
+ * - L1（本模块）：内存 LRU 缓存，最快，默认 30 页
+ * - L2：IndexedDB 持久化缓存（ChapterCacheDB），跨 session
+ * - L3：Worker 排版缓存（layout.worker.ts 内部）
+ *
+ * ## LRU 淘汰策略
+ *
+ * 当缓存达到 maxSize 上限时，淘汰最久未访问的页面。
+ * 访问顺序通过 accessOrder 数组维护：
+ * - 每次 get/set 将页面移到数组末尾（最近使用）
+ * - 淘汰时移除数组头部（最久未使用）
+ *
+ * ## 配置校验
+ *
+ * 每个缓存条目附带 configHash（排版配置哈希值）。
+ * 当字号/字体等配置变化时，configHash 不匹配的缓存条目
+ * 被视为过期并自动移除，防止使用旧布局的页面数据。
  */
 
 import type { PageDescriptor, LayoutConfig } from '../layout/types';

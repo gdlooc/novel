@@ -1,14 +1,47 @@
 /**
- * Paginator — Lazy, sliding-window page calculator.
+ * Paginator — 基于滑动窗口的懒分页器。
  *
- * Key design:
- * - Never paginates the entire text at once (supports million-word novels).
- * - Calculates pages on demand around a target position.
- * - Returns a window of pages with metadata about what's been computed.
- * - Can extend the window forward or backward.
+ * ## 核心设计
  *
- * The paginator owns a TextMeasurer for measurement during pagination.
- * It batches work: each call to paginate() computes up to maxPages pages.
+ * 本模块是整个排版引擎中最关键的性能组件。它的设计遵循以下原则：
+ *
+ * ### 1. 绝不一次性分页整本书
+ * 对于百万字级别的小说（如 500 章，每章 5000 字），如果一次性分页，
+ * 内存和 CPU 成本都不可接受。因此采用 **懒分页（lazy pagination）**：
+ * 每次只计算 `maxPages` 页（默认 10 页），按需扩展。
+ *
+ * ### 2. 滑动窗口
+ * 用户翻页时，Paginator 维护一个以当前阅读位置为中心的「窗口」。
+ * 当用户向窗口边缘移动时，窗口自动扩展（向前或向后）。
+ * 窗口外的页面可被缓存淘汰，保持内存可控。
+ *
+ * ### 3. 配置变更 → 全量失效
+ * 字号、字体、行距等任何 LayoutConfig 变化都会导致已排版页面失效。
+ * 通过 `hashLayoutConfig()` 生成的哈希值检测配置变更。
+ * 配置变更后：
+ * - 清空所有页面缓存
+ * - 清空分行结果（allLines）
+ * - 使用 charOffset（而非 pageIndex）恢复阅读位置
+ *
+ * ### 4. charOffset 定位
+ * 字符偏移量（charOffset）是排版无关的阅读位置标识。
+ * 字号变化会导致总页数变化（如从第 10 页变成第 8 页），
+ * 但 charOffset 始终指向文本中的同一个字符，因此：
+ * - 增大字号后重排版 → 用 charOffset 找到新布局中的对应页
+ * - 这个机制避免了 Bug #8（字号增大后页码越界）
+ *
+ * ## 使用示例
+ *
+ * ```
+ * const paginator = new Paginator();
+ * const result = paginator.paginate(chapterId, text, config, {
+ *   startPageIndex: 0, maxPages: 10
+ * });
+ * // 阅读到第 8 页后扩展窗口
+ * const more = paginator.paginate(chapterId, text, config, {
+ *   startPageIndex: 10, maxPages: 10
+ * });
+ * ```
  */
 
 import type {
@@ -79,14 +112,32 @@ export class Paginator {
   }
 
   /**
-   * Compute pages for a chapter.
+   * 对章节文本进行分页计算。
    *
-   * This is the main entry point. It computes up to `maxPages` pages
-   * starting from `startPageIndex`, using `startCharOffset` as the
-   * character position to begin pagination.
+   * 这是分页器的主入口方法。
    *
-   * If the config hash changed (e.g., font size was adjusted), all
-   * cached pages are invalidated and re-computed.
+   * ## 工作流程
+   *
+   * 1. 检查配置哈希是否变化（字号/字体/行距等）
+   * 2. 若配置变化：清空所有缓存，重新分行
+   * 3. 若首次调用该章节：调用 breakTextIntoLines 计算全章所有行
+   * 4. 将行数组分组为页面（buildPages）
+   *
+   * ## 参数说明
+   *
+   * @param chapterId - 章节唯一标识，用于缓存键和页面归属
+   * @param text - 章节原始文本内容
+   * @param config - 当前排版配置（字号、边距等）
+   * @param options.startPageIndex - 起始页码（0-based），翻页时窗口起始位置
+   * @param options.maxPages - 本次计算的最大页数（滑动窗口大小，默认 10）
+   * @param options.startCharOffset - 字符偏移量（替代 startPageIndex 定位）
+   *
+   * ## 返回值
+   *
+   * LayoutResult 包含：
+   * - pages: 本次计算出的页面数组（滑动窗口，非全量）
+   * - totalPagesKnown: 当前已知的总页数（-1=尚未到达末尾）
+   * - hasMore: 是否还有更多页面可计算
    */
   paginate(
     chapterId: string,
@@ -143,7 +194,25 @@ export class Paginator {
   }
 
   /**
-   * Build pages from pre-computed lines.
+   * 从预计算的行数组构建页面（内部分组逻辑）。
+   *
+   * ## 工作流程
+   *
+   * 1. 定位起始行：根据 startCharOffset 或 startPageIndex 找到开始分页的行索引
+   * 2. 逐行分组：从起始行开始，将行分组为页面，直到任一条件满足：
+   *    - 达到 maxPages 上限
+   *    - 行数组耗尽（章节末尾）
+   * 3. 越界保护：如果 startPageIndex/charOffset 越界，回退到有效行
+   * 4. 页码重算：从第 0 行走一遍，确定实际的 pageIndex
+   *
+   * ## 越界保护（Bug #8 修复）
+   *
+   * 字号增大后，旧 pageIndex 可能在新布局中不存在。
+   * 例如：旧布局有 15 页，用户在第 12 页；字号增大后新布局仅 8 页。
+   * 此时 startPageIndex=11 已越界，会被 clamp 到第 0 行。
+   *
+   * 更好的做法是使用 charOffset 定位（布局无关），
+   * 此函数也支持 startCharOffset 参数作为替代路径。
    */
   private buildPages(
     chapterId: string,

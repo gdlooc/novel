@@ -12,21 +12,28 @@ import { PlainTextAdapter } from './formats/PlainTextAdapter';
 
 /** Build a navigable chapter list from TOC entries */
 function buildChapterNav(entries: TocEntry[]): ChapterNav {
-  // Flatten chapters into reading order
+  // 扁平化章节列表（仅叶子章）
   const chapters: TocEntry[] = [];
+  // 章节 ID → 所属分卷名称的映射
+  const volumeMap = new Map<string, string>();
 
-  function flatten(list: TocEntry[]): void {
+  function flatten(list: TocEntry[], parentVolumeName?: string): void {
     for (const entry of list) {
       if (entry.children && entry.children.length > 0) {
-        flatten(entry.children);
+        // 当前条目是分卷，递归时传入分卷名
+        flatten(entry.children, entry.title);
       } else {
         chapters.push(entry);
+        // 记录叶子章所属分卷
+        if (parentVolumeName) {
+          volumeMap.set(entry.chapterId, parentVolumeName);
+        }
       }
     }
   }
   flatten(entries);
 
-  // If no leaf chapters, use all entries
+  // 如果没有叶子章，使用全部条目
   if (chapters.length === 0) {
     chapters.push(...entries);
   }
@@ -49,6 +56,7 @@ function buildChapterNav(entries: TocEntry[]): ChapterNav {
       if (idx > 0) return chapters[idx - 1];
       return undefined;
     },
+    getVolumeName: (id: string) => volumeMap.get(id),
     totalChapters: chapters.length,
   };
 }

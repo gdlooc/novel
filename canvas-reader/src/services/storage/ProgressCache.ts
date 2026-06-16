@@ -10,8 +10,14 @@ import { getItem, setItem } from './localStorage';
 export interface ReadingProgress {
   bookId: string;
   chapterId: string;
+  /** 翻页模式：当前页码（0-based） */
   pageIndex: number;
+  /** 字符偏移量（布局无关，字号/窗口变化后仍可定位） */
   charOffset: number;
+  /** 滚动模式：滚动偏移量（CSS 像素） */
+  scrollOffset?: number;
+  /** 排版配置哈希，用于判断 pageIndex/scrollOffset 是否仍然有效 */
+  layoutConfigHash?: string;
   updatedAt: number;
 }
 
@@ -62,6 +68,8 @@ export async function restoreReadingProgress(
         chapterId: stored.chapterId,
         pageIndex: stored.pageIndex,
         charOffset: stored.charOffset,
+        scrollOffset: stored.scrollOffset,
+        layoutConfigHash: stored.layoutConfigHash,
         updatedAt: stored.updatedAt,
       };
     }

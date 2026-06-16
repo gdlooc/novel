@@ -48,6 +48,8 @@ export interface ReaderState {
   layoutConfigHash: string | null;
   /** 每次排版递增，用于驱动滚动模式渲染刷新 */
   layoutVersion: number;
+  /** 待恢复的滚动偏移量（打开书籍时从进度恢复） */
+  pendingScrollRestore: number | null;
 
   // ─── Actions ───
   setBookInfo: (
@@ -69,6 +71,7 @@ export interface ReaderState {
   setLayoutConfigHash: (hash: string) => void;
   setStatus: (status: ReaderStatus, error?: string) => void;
   updateProgress: () => void;
+  setPendingScrollRestore: (offset: number | null) => void;
   reset: () => void;
 }
 
@@ -90,6 +93,7 @@ const initialState = {
   chapterProgress: 0,
   layoutConfigHash: null,
   layoutVersion: 0,
+  pendingScrollRestore: null,
 };
 
 export const useReaderStore = create<ReaderState>()((set, get) => ({
@@ -163,6 +167,8 @@ export const useReaderStore = create<ReaderState>()((set, get) => ({
       chapterProgress,
     });
   },
+
+  setPendingScrollRestore: (offset) => set({ pendingScrollRestore: offset }),
 
   reset: () => {
     set(initialState);

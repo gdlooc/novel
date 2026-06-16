@@ -1,8 +1,24 @@
 /**
- * uiStore — UI visibility and interaction state.
+ * uiStore — UI 可见性和交互状态管理。
  *
- * Manages panel visibility, loading overlays, and other
- * ephemeral UI state that doesn't need persistence.
+ * ## 职责范围
+ *
+ * 管理以下临时 UI 状态（不需要持久化到 localStorage）：
+ * - 面板显隐（顶栏、底栏、设置面板、目录面板）
+ * - 加载状态（全屏遮罩 + 加载文案）
+ * - 全屏模式
+ * - 章节导航目标
+ *
+ * ## 设计约束
+ *
+ * - 设置面板和目录面板互斥（打开一个时自动关闭另一个）
+ * - 点击阅读区域中央（tap-middle）切换顶/底栏显隐
+ * - 翻页/滚动时自动隐藏所有面板（hideAllPanels）
+ *
+ * ## 与 readerStore 的关系
+ *
+ * uiStore 只管 UI 显隐，readerStore 管阅读数据和位置。
+ * 两者通过 ReaderShell 组件协调工作。
  */
 
 import { create } from 'zustand';

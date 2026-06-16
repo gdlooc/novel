@@ -57,26 +57,40 @@ export interface CachedProgress {
   chapterId: string;
   pageIndex: number;
   charOffset: number;
+  /** 滚动模式：滚动偏移量（CSS 像素） */
+  scrollOffset?: number;
+  /** 排版配置哈希，用于验证视觉位置有效性 */
+  layoutConfigHash?: string;
   updatedAt: number;
 }
 
 const DB_NAME = 'canvas-reader-db';
-const DB_VERSION = 1;
+const DB_VERSION = 3; // v3: 统一管理 history store（修复 v2 可能缺失的问题）
 const STORE_BOOKS = 'books';
 const STORE_CHAPTERS = 'chapters';
 const STORE_PAGES = 'pages';
 const STORE_PROGRESS = 'progress';
+/** 历史记录 object store 名称（供 HistoryCache 复用） */
+export const STORE_HISTORY = 'history';
+
+/** 缓存 openDB 的 Promise，防止并发打开导致版本冲突 */
+let dbPromise: Promise<IDBDatabase> | null = null;
 
 /**
- * Open (or create) the IndexedDB database.
+ * 打开（或创建）IndexedDB 数据库（单例）。
+ * 版本升级时自动创建缺失的 object store。
+ * 多次调用返回同一个 Promise，避免 indexedDB.open() 竞态。
  */
 async function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
 
+      // v1 stores
       if (!db.objectStoreNames.contains(STORE_BOOKS)) {
         db.createObjectStore(STORE_BOOKS, { keyPath: 'bookId' });
       }
@@ -89,12 +103,27 @@ async function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_PROGRESS)) {
         db.createObjectStore(STORE_PROGRESS, { keyPath: 'bookId' });
       }
+      // v2: 历史记录 store
+      if (!db.objectStoreNames.contains(STORE_HISTORY)) {
+        db.createObjectStore(STORE_HISTORY, { keyPath: 'bookId' });
+      }
     };
 
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onerror = () => {
+      dbPromise = null; // 失败后清除缓存，允许重试
+      reject(request.error);
+    };
   });
+
+  return dbPromise;
 }
+
+/**
+ * 获取已打开的数据库实例（供 HistoryCache 等外部模块复用）。
+ * 避免多次 indexedDB.open() 版本冲突。
+ */
+export { openDB };
 
 /**
  * Helper to perform a transaction.

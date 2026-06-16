@@ -275,6 +275,11 @@ export class CanvasRenderer {
   /**
    * 渲染滚动模式内容。
    * 根据 scrollOffset 绘制可见的文本行。
+   *
+   * 性能优化：
+   * - 二分查找定位起始行（O(log n)），避免从第 0 行遍历
+   * - ctx.font / fillStyle / textBaseline 在循环外设置一次
+   *
    * @returns 内容总高度（CSS 像素）
    */
   renderScrollContent(
@@ -307,33 +312,36 @@ export class CanvasRenderer {
     ctx.fillStyle = this.theme.backgroundColor;
     ctx.fillRect(0, 0, pageWidth, viewportHeight);
 
-    // 找出可见范围内的行
-    const visibleTop = scrollOffset;
-    const visibleBottom = scrollOffset + viewportHeight;
+    // ── 计算可见范围 ──
     const lineHeight = config.fontSize * config.lineHeight;
-
-    // 添加一些缓冲区域，使滚动更平滑
     const bufferLines = 5;
     const bufferPx = bufferLines * lineHeight;
-    const renderTop = visibleTop - bufferPx;
-    const renderBottom = visibleBottom + bufferPx;
+    const renderTop = scrollOffset - bufferPx;
+    const renderBottom = scrollOffset + viewportHeight + bufferPx;
 
-    for (const line of lines) {
-      // 加上 paddingTop 后的实际 Y 位置
+    // ── 二分查找起始行索引 ──
+    // 行按 Y 坐标升序排列，定位第一个可能可见的行
+    const startIdx = this.binarySearchLineStart(
+      lines,
+      renderTop - config.paddingTop - lineHeight,
+    );
+
+    // ── 循环外设置不变属性，避免逐行重复解析 font 字符串 ──
+    ctx.font = `${config.fontSize}px ${config.fontFamily}`;
+    ctx.fillStyle = this.theme.textColor;
+    ctx.textBaseline = 'alphabetic';
+
+    // ── 只遍历可见范围内的行 ──
+    for (let i = startIdx; i < lines.length; i++) {
+      const line = lines[i];
       const lineY = line.y + config.paddingTop;
-      if (lineY + lineHeight < renderTop) continue; // 在可见区域上方
-      if (lineY > renderBottom) break; // 在可见区域下方
+
+      if (lineY > renderBottom) break; // 已超出可见区域，后续全部不可见
 
       const drawY = lineY - scrollOffset;
-
-      ctx.font = `${config.fontSize}px ${config.fontFamily}`;
-      ctx.fillStyle = this.theme.textColor;
-      ctx.textBaseline = 'alphabetic';
-      // 原始行 x 坐标不含 paddingLeft，滚动模式需手动补上
+      // 行 x 坐标不含 paddingLeft，手动补上
       ctx.fillText(line.text, line.x + config.paddingLeft, drawY + config.fontSize * 0.85);
     }
-
-    // 滚动模式下不绘制章节标题（避免与正文重叠）
 
     // 滚动进度条
     if (this.showProgressBar && totalHeight > viewportHeight) {
@@ -350,6 +358,31 @@ export class CanvasRenderer {
     ctx.restore();
 
     return totalHeight;
+  }
+
+  /**
+   * 二分查找第一个可能可见的行索引。
+   *
+   * 行数组按 line.y 升序排列，搜索 line.y >= targetY 的最小索引。
+   * 时间复杂度 O(log n)，替代 O(n) 的从头遍历。
+   */
+  private binarySearchLineStart(
+    lines: import('../layout/types').TextLine[],
+    targetY: number,
+  ): number {
+    let lo = 0;
+    let hi = lines.length - 1;
+
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (lines[mid].y < targetY) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+
+    return lo;
   }
 
   /**

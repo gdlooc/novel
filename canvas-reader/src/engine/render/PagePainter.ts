@@ -1,11 +1,24 @@
 /**
- * PagePainter — Draws a single page descriptor to a canvas context.
+ * PagePainter — 将 PageDescriptor 绘制到 Canvas 2D 上下文。
  *
- * This is a pure rendering function: it receives a canvas context,
- * a page descriptor, and paint options, and executes all draw calls.
+ * ## 职责边界
  *
- * It does NOT manage canvas sizing, DPR scaling, or animation state.
- * Those concerns belong to the CanvasRenderer.
+ * 这是一个纯绘制函数：接收 canvas context + 页面描述 + 绘制选项，
+ * 执行所有绘制调用，然后返回。
+ *
+ * **不负责：**
+ * - Canvas 尺寸管理（由 CanvasRenderer 负责）
+ * - DPR 缩放（调用者在调用前用 ctx.scale(dpr, dpr) 处理好）
+ * - 动画状态管理（animationOffset/opacity 由调用者传入）
+ * - 预渲染/离屏渲染（由 CanvasRenderer 协调）
+ *
+ * ## 绘制层级（从下到上）
+ *
+ * 1. 背景色填充 (theme.backgroundColor)
+ * 2. 正文文本行 (逐行 drawText)
+ * 3. 页眉：章节名称（居中，70% 字号，灰色）
+ * 4. 页脚：页码（居中，65% 字号，灰色）
+ * 5. 进度条：底部 2px 细条
  */
 
 import type { PageDescriptor, LayoutConfig } from '../layout/types';

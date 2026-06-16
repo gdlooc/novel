@@ -1,15 +1,39 @@
 /**
- * Render Web Worker — Offloads page rendering to an OffscreenCanvas if available.
+ * Render Web Worker — 将页面渲染卸载到 OffscreenCanvas 后台线程。
  *
- * This worker creates an OffscreenCanvas, renders pages to it, and returns
- * ImageBitmap objects to the main thread for instant display.
+ * ## 渐进增强策略
  *
- * This is a progressive enhancement: if OffscreenCanvas is not supported,
- * the main thread falls back to direct Canvas rendering.
+ * OffscreenCanvas 并非所有浏览器都支持（主要是 Safari 较晚支持）。
+ * 因此采用渐进增强：
+ * - 支持 OffscreenCanvas → Worker 渲染，ImageBitmap 零拷贝回传主线程
+ * - 不支持 → 主线程直接 Canvas 渲染（CanvasRenderer）
  *
- * Communication protocol:
- *   Main → Worker: { type: 'RENDER', requestId, pageDescriptor, config, theme, viewportState }
- *   Worker → Main: { type: 'RENDER_RESULT', requestId, imageBitmap }
+ * ## 工作流程
+ *
+ * 1. 主线程发送 RENDER 请求（页面描述 + 配置 + 主题）
+ * 2. Worker 创建 OffscreenCanvas，调用 paintPage() 绘制
+ * 3. Worker 通过 createImageBitmap() 生成 ImageBitmap
+ * 4. ImageBitmap 通过 postMessage 零拷贝传输（transfer）回主线程
+ * 5. 主线程通过 ctx.drawImage(bitmap) 即时显示
+ *
+ * ## 零拷贝传输
+ *
+ * `self.postMessage(response, [imageBitmap])` 中的第二个参数
+ * 是 Transferable 对象列表。被转移的对象在发送方变为无效，
+ * 接收方获得所有权，避免了深拷贝的性能开销。
+ *
+ * ## 通信协议
+ *
+ * 主线程 → Worker：
+ * ```
+ * { type: 'RENDER', requestId, page, config, theme, chapterTitle, showHeaderFooter, showProgressBar }
+ * ```
+ *
+ * Worker → 主线程：
+ * ```
+ * { type: 'RENDER_RESULT', requestId, imageBitmap | null, error? }
+ * { type: 'RENDER_WORKER_READY' }
+ * ```
  */
 
 import type { PageDescriptor, LayoutConfig } from '../layout/types';
