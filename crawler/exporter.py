@@ -228,7 +228,8 @@ class NovelExporter:
         print(f"[*] 导出 EPUB → {output_path}")
 
         book = epub.EpubBook()
-        book.set_identifier(f"wenku8_aid_{self.metadata.get('aid', 0)}")
+        local_aid = self.metadata.get("aid", 0)
+        book.set_identifier(f"novel_aid_{local_aid}")
         book.set_title(self.title)
         book.set_language("zh")
         book.add_author(self.author)

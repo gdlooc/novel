@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests as http_requests
+from database import NovelDB
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -34,10 +35,10 @@ _REQUEST_HEADERS = {
 }
 
 
-def build_referer(cid: int, aid: int = 3057) -> str:
-    """根据章节 cid 构造来源页 URL"""
-    group = aid // 1000
-    return f"https://www.wenku8.net/novel/{group}/{aid}/{cid}.htm"
+def build_referer(source_cid: int, source_aid: int) -> str:
+    """根据源站 cid 和 aid 构造来源页 URL"""
+    group = source_aid // 1000
+    return f"https://www.wenku8.net/novel/{group}/{source_aid}/{source_cid}.htm"
 
 
 async def download_via_playwright(image_url: str, referer: str) -> Optional[bytes]:
@@ -125,17 +126,17 @@ def repair_novel(
 
     # 加载元数据
     meta = json.loads((base / "metadata.json").read_text(encoding="utf-8"))
-    aid = meta.get("aid", 0)
+    local_aid = meta.get("aid", 0)
     title = meta.get("title", "未知")
     total = meta.get("total_chapters", 0)
 
     print(f"\n{'='*60}")
     print(f"  插图修复 — {title}")
-    print(f"  aid={aid}  总章节={total}")
+    print(f"  aid={local_aid}  总章节={total}")
     print(f"{'='*60}\n")
 
     chapters_dir = base / "chapters"
-    images_dir = base / "images"
+    images_root = base.parent / "images" / str(local_aid)
 
     # 收集有插图的章节
     chapters_with_images = []
@@ -163,18 +164,21 @@ def repair_novel(
     total_skip = 0
 
     for i, ch_data in enumerate(chapters_with_images, 1):
-        cid = ch_data["cid"]
-        chap_title = ch_data.get("title", f"cid_{cid}")[:40]
+        local_cid = ch_data["cid"]
+        source_cid = ch_data.get("data_source_cid", local_cid)
+        source_aid = ch_data.get("data_source_aid", local_aid)
+        chap_title = ch_data.get("title", f"cid_{local_cid}")[:40]
         images = ch_data.get("images", [])
-        chapter_url = build_referer(cid, aid)
+        chapter_url = build_referer(source_cid, source_aid)
 
         status_parts = []
 
-        for img in images:
+        for idx, img in enumerate(images, 1):
             url = img["url"]
-            filename = img["filename"]
-            img_dir = images_dir / str(cid)
-            local_path = img_dir / filename
+            ext = img.get("filename", ".jpg").rsplit(".", 1)[-1] if "." in img.get("filename", "") else "jpg"
+            new_filename = f"{idx}.{ext}"
+            img_dir = images_root / str(local_cid)
+            local_path = img_dir / new_filename
 
             # 跳过已存在且非空的文件
             if local_path.exists() and local_path.stat().st_size > 0:
@@ -182,7 +186,7 @@ def repair_novel(
                 continue
 
             if dry_run:
-                status_parts.append(f"{filename} (缺失)")
+                status_parts.append(f"{new_filename} (缺失)")
                 continue
 
             img_dir.mkdir(parents=True, exist_ok=True)
@@ -201,16 +205,41 @@ def repair_novel(
             if img_bytes:
                 local_path.write_bytes(img_bytes)
                 total_ok += 1
-                status_parts.append(f"{filename} [OK]")
+                status_parts.append(f"{new_filename} [OK]")
             else:
                 total_fail += 1
-                status_parts.append(f"{filename} [FAIL]")
+                status_parts.append(f"{new_filename} [FAIL]")
+
+        # ── 写入 DB ──
+        if not dry_run and (total_ok > 0 or total_skip > 0):
+            try:
+                db = NovelDB()
+                db_chapters = db.get_chapters(local_aid)
+                db_chapter_id = None
+                for dc in db_chapters:
+                    if dc.get("sort_order") == local_cid:
+                        db_chapter_id = dc["id"]
+                        break
+                if db_chapter_id:
+                    db_images = []
+                    for idx, img in enumerate(images, 1):
+                        ext = img.get("filename", ".jpg").rsplit(".", 1)[-1] if "." in img.get("filename", "") else "jpg"
+                        db_images.append({
+                            "url": img["url"],
+                            "filename": f"{idx}.{ext}",
+                            "local_path": str(images_root / str(local_cid) / f"{idx}.{ext}"),
+                            "downloaded": True,
+                        })
+                    db.insert_images(db_chapter_id, db_images)
+                db.close()
+            except Exception as e:
+                print(f"    [!] DB 写入失败: {e}")
 
         # 进度输出
         ok = "[FAIL]" not in " ".join(status_parts)
         icon = "[OK]" if ok else "[!]"
         detail = ", ".join(status_parts)
-        print(f"  [{i:2d}/{len(chapters_with_images)}] cid={cid} {icon}  "
+        print(f"  [{i:2d}/{len(chapters_with_images)}] cid={local_cid} {icon}  "
               f"{chap_title[:30]}  [{detail}]")
 
     print(f"\n{'='*60}")
