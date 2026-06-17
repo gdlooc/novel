@@ -21,9 +21,11 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 # 导入项目内模块
-from auth import resolve_cookies
-from fetcher import PlaywrightFetcher
+from fetch.auth import resolve_cookies
+from fetch.fetcher import PlaywrightFetcher
 
 
 # ═══════════════════════════════════════════════════════════════

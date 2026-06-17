@@ -30,19 +30,22 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+# 确保 crawler/ 目录在 sys.path 中
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 # 第三方库
 import requests as http_requests  # 仅用于图片下载（CDN 无 Cloudflare 防护）
 
 # 导入项目内模块
-from auth import resolve_cookies
-from fetcher import PlaywrightFetcher
-from parser_catalog import parse_catalog_html
-from parser_chapter import parse_chapter_html
-from parser_book import parse_book_html
-from database import NovelDB
+from fetch.auth import resolve_cookies
+from fetch.fetcher import PlaywrightFetcher
+from fetch.parser_catalog import parse_catalog_html
+from fetch.parser_chapter import parse_chapter_html
+from fetch.parser_book import parse_book_html
+from core.database import NovelDB
 
 # 数据源配置路径
-_DATA_SOURCES_PATH = Path(__file__).parent / "data_sources.json"
+_DATA_SOURCES_PATH = Path(__file__).parent.parent / "data_sources.json"
 
 
 def _load_data_source_name(source_id: int) -> str:
@@ -830,10 +833,12 @@ class NovelScraper:
         source_aid = self.config.source_aid
         content = chapter_data.get("content", "")
 
+        volume_id = self._get_volume_id(source_cid)
+
         data = {
             "novel_id": self._novel_id,
             "data_source_cid": source_cid,
-            "volume_id": None,
+            "volume_id": volume_id,
             "title": chapter_data.get("title", ""),
             "content": content,
             "book_title": chapter_data.get("book_title", ""),
@@ -855,7 +860,22 @@ class NovelScraper:
             self._db.insert_images(chapter_id, images_info)
 
     def _ensure_novel_record(self) -> int:
-        """确保 novels 表中有记录（章节下载前需要外键），返回 novel_id"""
+        """确保 novels 表中有记录（章节下载前需要外键），返回 novel_id
+
+        同时插入卷信息并构建源站 cid → DB volume_id 的映射。
+        """
+        # 构建卷列表（用于 DB 插入）
+        volumes_data = []
+        self._cid_to_volume: Dict[int, int] = {}  # 源站 cid → DB volume_id（临时，保存完即失效）
+        for vol_idx, vol in enumerate(self._catalog_data.get("volumes", [])):
+            volumes_data.append({
+                "name": vol.get("name", f"第{vol_idx+1}卷"),
+                "sort_order": vol_idx,
+            })
+            # DB volume_id = vol_idx + 1（自增，这里先假设连续，保存后从DB读取实际id）
+            for ch in vol.get("chapters", []):
+                self._cid_to_volume[ch["cid"]] = vol_idx + 1
+
         meta = {
             "data_source_id": self.config.data_source_id,
             "data_source_aid": self.config.source_aid,
@@ -874,11 +894,38 @@ class NovelScraper:
             "completed_chapters": 0,
             "data_source_catalog_url": self.config.catalog_url,
             "data_source_book_url": self.config.book_url,
+            "_volumes": volumes_data,
         }
-        return self._db.insert_novel(meta)
+        novel_id = self._db.insert_novel(meta)
+
+        # 从 DB 回读实际的 volume_id，建立源站 cid → volume_id 映射
+        self._cid_to_volume: Dict[int, int] = {}
+        with self._db._conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, sort_order FROM volumes WHERE novel_id = %s ORDER BY sort_order",
+                (novel_id,),
+            )
+            db_volumes = {row["sort_order"]: row["id"] for row in cur.fetchall()}
+
+        # 重建映射：源站 cid → DB volume_id
+        for vol_idx, vol in enumerate(self._catalog_data.get("volumes", [])):
+            actual_vol_id = db_volumes.get(vol_idx)
+            if actual_vol_id:
+                for ch in vol.get("chapters", []):
+                    self._cid_to_volume[ch["cid"]] = actual_vol_id
+
+        return novel_id
+
+    def _get_volume_id(self, source_cid: int) -> Optional[int]:
+        """根据源站 cid 查找所属卷的 DB volume_id"""
+        return self._cid_to_volume.get(source_cid) if hasattr(self, '_cid_to_volume') else None
 
     def _save_novel_record(self, all_chapters: List[Dict]):
         """保存小说元数据到数据库"""
+        # 清理：重试成功的章节从失败列表中移除，并持久化
+        self._failed_cids = [c for c in self._failed_cids if c not in self._completed_cids]
+        self._save_checkpoint()
+
         ds_id = self.config.data_source_id
         source_aid = self.config.source_aid
 

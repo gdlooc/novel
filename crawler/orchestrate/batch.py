@@ -20,10 +20,12 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 # 导入项目内模块
-from auth import resolve_cookies
-from scraper import NovelScraper, ScraperConfig
-from discover import NovelDiscoverer, DiscoveredNovel
+from fetch.auth import resolve_cookies
+from orchestrate.scraper import NovelScraper, ScraperConfig
+from orchestrate.discover import NovelDiscoverer, DiscoveredNovel
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -307,7 +309,7 @@ class BatchScraper:
     def _scan_completed_source_aids(self) -> Set[int]:
         """从数据库查询已完成下载的源站 aid 集合"""
         try:
-            from database import NovelDB
+            from core.database import NovelDB
             db = NovelDB()
             result = db.get_all_source_aids()
             db.close()

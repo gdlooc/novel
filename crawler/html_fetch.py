@@ -17,8 +17,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from auth import login_via_playwright, resolve_cookies
-from fetcher import PlaywrightFetcher
+sys.path.insert(0, str(Path(__file__).parent))
+
+from fetch.auth import login_via_playwright, resolve_cookies
+from fetch.fetcher import PlaywrightFetcher
 
 
 def ensure_dependencies():
@@ -203,7 +205,7 @@ def _fetch_with_login_session(
                 await page.wait_for_timeout(3000)
 
             page_content = await page.content()
-            from auth import _is_login_success
+            from fetch.auth import _is_login_success
             if not _is_login_success(page_content):
                 if "密码错误" in page_content or "错误" in page_content:
                     print("[X] 登录失败：密码错误")
@@ -218,7 +220,7 @@ def _fetch_with_login_session(
             pw_cookies = await context.cookies()
             cookies = {c["name"]: c["value"] for c in pw_cookies}
             if "jieqiUserInfo" in cookies:
-                from auth import save_cached_cookies
+                from fetch.auth import save_cached_cookies
                 save_cached_cookies(cookies)
                 print(f"[*] 已缓存 {len(cookies)} 个 cookies")
 

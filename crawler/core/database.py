@@ -503,16 +503,24 @@ class NovelDB:
         (out / "metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        # ── 读取卷信息 ──
+        volume_map: Dict[int, str] = {}
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT id, name FROM volumes WHERE novel_id = %s ORDER BY sort_order", (novel_id,))
+            for row in cur.fetchall():
+                volume_map[row["id"]] = row["name"]
+
         # ── chapters.json ──（cid 使用 sort_order，保证每本小说从1递增）──
         chapters_list = []
         for ch in chapters:
             local_cid = ch.get("sort_order", ch["id"])
+            vol_name = volume_map.get(ch.get("volume_id") or 0, "")
             chapters_list.append({
                 "cid": local_cid,
                 "data_source_cid": ch["data_source_cid"],
                 "aid": novel_id,
                 "data_source_aid": novel["data_source_aid"],
-                "volume": "",
+                "volume": vol_name,
                 "title": ch["title"],
                 "data_source_chapter_url": ch["data_source_chapter_url"],
                 "completed": True,

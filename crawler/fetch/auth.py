@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 # 导入项目内模块
-from cookie_utils import parse_cookie_string
+from fetch.cookie_utils import parse_cookie_string
 
 
 # ==================== 常量定义 ====================
@@ -31,7 +31,7 @@ from cookie_utils import parse_cookie_string
 BASE_URL = "https://www.wenku8.net"
 
 # 默认 Cookie 缓存文件路径（在 crawler 目录下）
-DEFAULT_COOKIE_CACHE = Path(__file__).parent / ".auth_cookies.json"
+DEFAULT_COOKIE_CACHE = Path(__file__).parent.parent / ".auth_cookies.json"
 
 # 浏览器 User-Agent
 _BROWSER_UA = (

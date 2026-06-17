@@ -16,8 +16,10 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import requests as http_requests
-from database import NovelDB
+from core.database import NovelDB
 
 
 # ═══════════════════════════════════════════════════════════════
