@@ -299,10 +299,10 @@ class NovelScraper:
                 print("  [空内容]")
                 continue
 
-            # 下载插图
+            # 下载插图（传入章节 URL 作为 Referer 防盗链）
             images_info = []
             if has_images:
-                images_info = self._download_images(chapter_data, cid)
+                images_info = self._download_images(chapter_data, cid, ch["url"])
                 chapter_data["images"] = images_info
 
             # 保存章节
@@ -326,12 +326,16 @@ class NovelScraper:
 
     # ---------- 私有方法：图片下载 ----------
 
-    def _download_images(self, chapter_data: Dict, cid: int) -> List[Dict]:
-        """下载章节插图到本地（使用 requests，CDN 无 Cloudflare）
+    def _download_images(self, chapter_data: Dict, cid: int, chapter_url: str = "") -> List[Dict]:
+        """下载章节插图到本地
+
+        图片 CDN (pic.777743.xyz) 有防盗链保护，需要携带 Referer 和浏览器 UA。
+        先用轻量的 requests 尝试（带 headers），失败则回退到 Playwright 浏览器下载。
 
         Args:
             chapter_data: 章节解析结果（含 images 字段）
             cid: 章节 ID
+            chapter_url: 章节页面 URL，用作 Referer 防盗链
 
         Returns:
             [{"url": "...", "filename": "...", "local_path": "...", "downloaded": bool}, ...]
@@ -342,6 +346,21 @@ class NovelScraper:
 
         images_dir = self.config.novel_dir / "images" / str(cid)
         images_dir.mkdir(parents=True, exist_ok=True)
+
+        # 浏览器伪装头（模拟从章节页点击查看图片）
+        _REQUEST_HEADERS = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        if chapter_url:
+            _REQUEST_HEADERS["Referer"] = chapter_url
+            # 某些 CDN 还会检查 Origin
+            _REQUEST_HEADERS["Origin"] = "https://www.wenku8.net"
 
         results = []
         for img in images:
@@ -361,20 +380,111 @@ class NovelScraper:
                 results.append(result)
                 continue
 
-            # 下载图片（图片 CDN 无 Cloudflare，用 requests 即可）
+            # ── 策略1: requests + 完整浏览器头（轻量快速）──
             try:
-                resp = http_requests.get(url, timeout=self.config.timeout)
+                resp = http_requests.get(
+                    url,
+                    headers=_REQUEST_HEADERS,
+                    timeout=self.config.timeout,
+                )
                 if resp.status_code == 200:
                     local_path.write_bytes(resp.content)
                     result["downloaded"] = True
+                    results.append(result)
+                    continue
+                elif resp.status_code == 403:
+                    # 防盗链拒绝 → 静默打印提示，继续尝试 Playwright
+                    pass
                 else:
                     print(f"\n  [!] 图片 {filename} HTTP {resp.status_code}")
+                    results.append(result)
+                    continue
             except Exception as e:
-                print(f"\n  [!] 图片 {filename} 下载失败: {e}")
+                print(f"\n  [!] 图片 {filename} requests 下载失败: {e}")
+                results.append(result)
+                continue
+
+            # ── 策略2: requests 失败 → Playwright 浏览器下载（绕过严格防盗链）──
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                img_bytes = loop.run_until_complete(
+                    self._fetch_image_via_playwright(url, chapter_url)
+                )
+                loop.close()
+                if img_bytes:
+                    local_path.write_bytes(img_bytes)
+                    result["downloaded"] = True
+                else:
+                    print(f"\n  [!] 图片 {filename} Playwright 也下载失败")
+            except Exception as e:
+                print(f"\n  [!] 图片 {filename} Playwright 下载异常: {e}")
 
             results.append(result)
 
         return results
+
+    async def _fetch_image_via_playwright(self, image_url: str, referer: str = ""):
+        """使用 Playwright 浏览器下载单张图片（绕过严格防盗链）
+
+        图片 CDN 可能要求完整的浏览器环境（TLS 指纹、HTTP/2 等），
+        requests 库即使带了 Referer 也可能被拒。Playwright 提供真实浏览器上下文。
+
+        Args:
+            image_url: 图片 URL
+            referer: 来源页面 URL
+
+        Returns:
+            图片字节数据，或 None
+        """
+        try:
+            from playwright.async_api import async_playwright
+
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                    ],
+                )
+                context = await browser.new_context(
+                    viewport={"width": 1366, "height": 768},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    locale="zh-CN",
+                )
+                page = await context.new_page()
+
+                # 先访问来源页建立 Referer 链
+                if referer:
+                    try:
+                        await page.goto(referer, wait_until="domcontentloaded", timeout=15000)
+                        await page.wait_for_timeout(500)
+                    except Exception:
+                        pass  # 即使来源页访问失败也继续尝试图片下载
+
+                # 用 page.evaluate 发起 fetch 请求下载图片字节
+                img_bytes = await page.evaluate("""
+                    async (url) => {
+                        const resp = await fetch(url, {referrer: document.location.href});
+                        if (!resp.ok) return null;
+                        const blob = await resp.blob();
+                        const buf = await blob.arrayBuffer();
+                        return Array.from(new Uint8Array(buf));
+                    }
+                """, image_url)
+
+                await browser.close()
+
+                if img_bytes:
+                    return bytes(img_bytes)
+                return None
+        except Exception:
+            return None
 
     # ---------- 私有方法：保存 ----------
 
