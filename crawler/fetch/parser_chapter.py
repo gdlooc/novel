@@ -100,16 +100,6 @@ class ChapterParser:
             "index_url": nav.get("index_url", ""),
         }
 
-    def to_json(self, filepath: str):
-        """解析并输出为 JSON 文件"""
-        import json
-        result = self.parse()
-        Path(filepath).write_text(
-            json.dumps(result, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return result
-
     def to_text(self) -> str:
         """解析并返回纯文本格式（章节标题 + 正文）"""
         result = self.parse()

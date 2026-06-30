@@ -267,6 +267,44 @@ class NovelDiscoverer:
         print(f"[+] 索引已保存: {out} ({len(novels)} 本)")
 
     @staticmethod
+    def save_to_database(novels: List[DiscoveredNovel]) -> int:
+        """保存站点索引到数据库（site_novels 表）
+
+        批量插入或更新全站索引，返回成功写入的数量。
+
+        Args:
+            novels: 发现的小说列表
+
+        Returns:
+            写入数据库的小说数量
+        """
+        try:
+            from core.database import NovelDB
+            db = NovelDB()
+
+            # 转换为字典格式
+            novels_data = [
+                {
+                    "data_source_aid": n.aid,
+                    "title": n.title,
+                    "url": n.url,
+                }
+                for n in novels
+            ]
+
+            # 批量写入
+            db.batch_upsert_site_novels(novels_data)
+            count = len(novels_data)
+
+            db.close()
+            print(f"[+] 索引已写入数据库: site_novels 表 ({count} 本)")
+            return count
+
+        except Exception as e:
+            print(f"[!] 写入数据库失败: {e}")
+            return 0
+
+    @staticmethod
     def load_index(path: str = "novels/_site_index.json") -> List[DiscoveredNovel]:
         """从 JSON 文件加载站点索引"""
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -335,6 +373,8 @@ def main():
     # ── 保存 ──
     if novels:
         NovelDiscoverer.save_index(novels, args.output)
+        # 同时写入数据库
+        NovelDiscoverer.save_to_database(novels)
     else:
         print("[X] 未发现任何小说")
         sys.exit(1)

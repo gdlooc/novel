@@ -37,7 +37,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import requests as http_requests  # 仅用于图片下载（CDN 无 Cloudflare 防护）
 
 # 导入项目内模块
+from core.logger import get_logger
 from fetch.auth import resolve_cookies
+
+_log = get_logger("scraper")
 from fetch.fetcher import PlaywrightFetcher
 from fetch.parser_catalog import parse_catalog_html
 from fetch.parser_chapter import parse_chapter_html
@@ -97,6 +100,8 @@ class ScraperConfig:
         concurrency: int = 3,
         data_source_id: int = 1,
         local_aid: int = 0,
+        username: str = "",
+        password: str = "",
     ):
         """
         Args:
@@ -108,6 +113,8 @@ class ScraperConfig:
             concurrency: 并发下载数（1=串行，>1=并发），默认3
             data_source_id: 数据来源站 ID（对应 data_sources.json），默认1=wenku8
             local_aid: 本站小说 ID（0=自动分配）
+            username: 登录用户名（用于 Cookie 过期时自动重新登录）
+            password: 登录密码
         """
         self.source_aid = aid          # 数据来源站的小说 ID
         self.group = aid // 1000       # URL 分组参数
@@ -118,6 +125,8 @@ class ScraperConfig:
         self.concurrency = max(1, concurrency)
         self.data_source_id = data_source_id
         self._local_aid = local_aid   # 0=待分配
+        self._username = username      # 用于自动重新登录
+        self._password = password
 
     @property
     def base_url(self) -> str:
@@ -184,7 +193,7 @@ class NovelScraper:
         # 数据库
         self._db = NovelDB()
 
-        # ID 映射：源站 cid → 本站 cid（按下载顺序从1递增）
+        # ID 映射：源站 cid → 本站 cid（按目录顺序预分配，由 _assign_local_cids 初始化）
         self._cid_map: Dict[int, int] = {}
         self._next_local_cid: int = 1
         self._novel_id: int = 0  # DB 返回的本站 aid
@@ -209,7 +218,7 @@ class NovelScraper:
         2. 下载目录页 → 解析章节列表
         3. 遍历剩余章节 → 下载并解析
         4. 保存到数据库
-        5. 导出 JSON（兼容 canvas-reader）
+        5. 导出 JSON（兼容 novel-frontend）
         """
         source_aid = self.config.source_aid
 
@@ -240,9 +249,11 @@ class NovelScraper:
             print(f"  标签: {', '.join(self._book_data.get('tags', []))}")
             print(f"  状态: {self._book_data.get('status', '?')}")
             print(f"  字数: {self._book_data.get('word_count', '?')}")
+            _log.info("开始下载 aid=%s: %s (评分=%s)", self.config.source_aid, self._novel_title, self._book_data.get("rating", ""))
         else:
             self._book_data = {}
             print("  [!] 书页获取失败，将使用目录页信息")
+            _log.warning("书页获取失败 aid=%s", self.config.source_aid)
         print()
 
         # ---------- 步骤2: 获取章节列表 ----------
@@ -275,9 +286,22 @@ class NovelScraper:
         print(f"  待下载: {len(pending)} 章 (已完成 {len(self._completed_cids)} 章)")
         print()
 
+        # ── 按目录顺序预分配 local_cid（修复并发下载乱序问题）──
+        # 在并发模式下，章节可能按下载完成顺序获得 local_cid，
+        # 导致第14章先下载完获得 cid=1。此处按目录顺序预分配，
+        # 确保 sort_order 始终等于章节在目录中的位置。
+        self._assign_local_cids(all_chapters)
+
+        # ── 重建 volume 映射（恢复模式关键步骤）──
+        # 恢复下载时 _ensure_novel_record() 不会执行，导致 _cid_to_volume 未初始化，
+        # 所有章节 volume_id 会变成 NULL。此处在目录数据就绪后立即重建映射。
+        if self._novel_id:
+            self._build_volume_mapping(self._novel_id)
+
         # ── 确保 novel 记录存在（下载章节前需要 novel_id 外键）──
+        # 传入 total_chapters 防止中断时残留为 0
         if not self._novel_id:
-            self._novel_id = self._ensure_novel_record()
+            self._novel_id = self._ensure_novel_record(total_chapters=len(all_chapters))
 
         # ---------- 步骤3: 下载章节 ----------
         print("[3/5] 下载章节...")
@@ -295,7 +319,7 @@ class NovelScraper:
 
         # ── 翻译导航 ID（由导出时自动完成）──
 
-        # ---------- 步骤5: 导出 JSON（兼容 canvas-reader）----------
+        # ---------- 步骤5: 导出 JSON（兼容 novel-frontend）----------
         print()
         print("[5/5] 导出 JSON 文件...")
         try:
@@ -303,9 +327,27 @@ class NovelScraper:
         except Exception as e:
             print(f"  [!] 导出失败: {e}")
 
+        # ── 同步 site_novels 元数据（tags/status/rating 反向回填）──
+        self._sync_site_novel_metadata()
+
         self._cleanup_temp_files()
         self._print_summary(all_chapters)
         return True
+
+    def _sync_site_novel_metadata(self):
+        """下载完成后将 novels 表的 tags/status/rating 反向同步到 site_novels
+
+        设计意图：
+        - discover.py 发现小说时 site_novels.tags/status/rating 为空
+        - 下载完成后从 novels 表读取完整元数据回填
+        - 同步失败不阻塞主流程（仅打印警告）
+        """
+        if self._novel_id > 0:
+            try:
+                self._db.sync_site_novel_from_novel(self._novel_id)
+                print(f"  [DB] 已同步 site_novels 元数据")
+            except Exception as e:
+                print(f"  [!] 同步 site_novels 失败: {e}")
 
     def _cleanup_temp_files(self):
         """清理旧的临时文件目录"""
@@ -327,6 +369,7 @@ class NovelScraper:
         if retries is None:
             retries = self.config.max_retries
 
+        cookie_refreshed = False  # 每次调用只刷新一次 Cookie
         for attempt in range(retries + 1):
             try:
                 fetcher = PlaywrightFetcher(
@@ -337,8 +380,15 @@ class NovelScraper:
                 if result.status_code == 200:
                     return result.html
                 elif result.status_code == 403:
-                    # Cloudflare 拦截
-                    print(f"\n  [!] 被 Cloudflare 拦截 (403): {url[-60:]}")
+                    # Cloudflare 拦截 → 尝试刷新 Cookie 后重试
+                    print(f"\n  [!] HTTP 403: {url[-60:]}")
+                    if not cookie_refreshed:
+                        cookie_refreshed = True
+                        if self._try_refresh_cookies():
+                            wait = 2 ** attempt
+                            print(f"  [!] 用新 Cookie 重试 ({attempt+1}/{retries})，{wait}s后...")
+                            time.sleep(wait)
+                            continue
                     if attempt < retries:
                         wait = 2 ** attempt
                         print(f"  [!] 重试 ({attempt+1}/{retries})，{wait}s后...")
@@ -384,6 +434,7 @@ class NovelScraper:
         if retries is None:
             retries = self.config.max_retries
 
+        cookie_refreshed = False  # 每次调用只刷新一次 Cookie
         for attempt in range(retries + 1):
             context = None
             try:
@@ -430,7 +481,13 @@ class NovelScraper:
                 if status_code == 200:
                     return html
                 elif status_code == 403:
-                    # Cloudflare 拦截
+                    # Cloudflare 拦截 → 尝试刷新 Cookie 后重试
+                    if not cookie_refreshed:
+                        cookie_refreshed = True
+                        if self._try_refresh_cookies():
+                            wait = 2 ** attempt
+                            await asyncio.sleep(wait)
+                            continue
                     if attempt < retries:
                         wait = 2 ** attempt
                         await asyncio.sleep(wait)
@@ -450,6 +507,103 @@ class NovelScraper:
                 if context:
                     await context.close()
 
+        return None
+
+    def _try_refresh_cookies(self) -> bool:
+        """尝试重新登录刷新 Cookie
+
+        当请求返回 403 时调用，使用配置中存储的凭据重新登录。
+        成功则更新 self.cookies，失败则保持原 cookies 不变。
+
+        Returns:
+            True=刷新成功, False=无法刷新
+        """
+        if not self.config._username or not self.config._password:
+            return False  # 无凭据，无法刷新
+
+        print("  [*] Cookie 可能已过期，尝试重新登录...")
+        try:
+            from fetch.auth import login
+            new_cookies = login(
+                username=self.config._username,
+                password=self.config._password,
+                force_refresh=True,
+            )
+            if new_cookies:
+                self.cookies = new_cookies
+                _log.info("Cookie 刷新成功")
+                print("  [+] Cookie 刷新成功，继续下载")
+                return True
+            else:
+                _log.error("Cookie 刷新失败")
+                print("  [!] Cookie 刷新失败")
+                return False
+        except Exception as e:
+            _log.error("Cookie 刷新异常: %s", e)
+            print(f"  [!] Cookie 刷新异常: {e}")
+            return False
+
+    # ---------- 私有方法：local_cid 分配 ----------
+
+    def _assign_local_cids(self, all_chapters: List[Dict]):
+        """按目录顺序为所有章节预分配 local_cid
+
+        解决问题：
+        1. 并发下载时 local_cid 按下载完成顺序分配，导致 sort_order 乱序
+        2. 恢复下载时 _next_local_cid 从 1 开始，与已下载章节的 sort_order 冲突
+
+        策略：
+        - 查询 DB 中该小说已有的最大 sort_order，_next_local_cid 从其后开始
+        - 按目录顺序遍历所有章节，为尚未完成的章节预分配 local_cid
+        - 已完成的章节从 DB 读回其 sort_order 填入 _cid_map（供导航翻译用）
+
+        Args:
+            all_chapters: 目录中的完整章节列表（已按目录顺序排列）
+        """
+        # 1. 确定起始 local_cid：DB 中已有最大 sort_order + 1
+        max_existing = 0
+        if self._novel_id > 0:
+            try:
+                with self._db._conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COALESCE(MAX(sort_order), 0) AS m FROM chapters WHERE novel_id = %s",
+                        (self._novel_id,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        max_existing = row["m"]
+            except Exception:
+                pass
+
+        self._next_local_cid = max_existing + 1
+
+        # 2. 按目录顺序为每个章节分配 local_cid
+        for ch in all_chapters:
+            source_cid = ch["cid"]
+            if source_cid in self._completed_cids:
+                # 已完成的章节：从 DB 读回 sort_order
+                existing = self._get_existing_sort_order(source_cid)
+                if existing is not None:
+                    self._cid_map[source_cid] = existing
+            else:
+                # 待下载的章节：按目录顺序预分配
+                self._cid_map[source_cid] = self._next_local_cid
+                self._next_local_cid += 1
+
+    def _get_existing_sort_order(self, source_cid: int) -> Optional[int]:
+        """查询已下载章节的 sort_order"""
+        if self._novel_id > 0:
+            try:
+                with self._db._conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT sort_order FROM chapters WHERE novel_id = %s AND data_source_cid = %s",
+                        (self._novel_id, source_cid),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        return row["sort_order"]
+            except Exception:
+                pass
         return None
 
     # ---------- 私有方法：并发章节下载 ----------
@@ -488,11 +642,8 @@ class NovelScraper:
 
             # ── 等待槽位 ──
             async with semaphore:
-                # ── 分配本站 cid（需要锁，防止并发竞态）──
-                async with checkpoint_lock:
-                    local_cid = self._next_local_cid
-                    self._cid_map[source_cid] = local_cid
-                    self._next_local_cid += 1
+                # 使用预分配的 local_cid（按目录顺序，而非下载完成顺序）
+                local_cid = self._cid_map.get(source_cid, 0)
 
                 # ── 任务启动前随机延迟 ──
                 pre_delay = random.uniform(0.5, self.config.delay_seconds + 0.5)
@@ -602,10 +753,8 @@ class NovelScraper:
             source_cid = ch["cid"]
             title = ch["title"]
 
-            # 分配本站 cid（按下载顺序递增）
-            local_cid = self._next_local_cid
-            self._cid_map[source_cid] = local_cid
-            self._next_local_cid += 1
+            # 使用预分配的 local_cid（按目录顺序，已在 _assign_local_cids 中分配）
+            local_cid = self._cid_map.get(source_cid, 0)
 
             # 进度显示
             elapsed = time.time() - start_time
@@ -859,22 +1008,22 @@ class NovelScraper:
         if images_info:
             self._db.insert_images(chapter_id, images_info)
 
-    def _ensure_novel_record(self) -> int:
+    def _ensure_novel_record(self, total_chapters: int = 0) -> int:
         """确保 novels 表中有记录（章节下载前需要外键），返回 novel_id
 
-        同时插入卷信息并构建源站 cid → DB volume_id 的映射。
+        同时插入卷信息并调用 _rebuild_volume_mapping 建立映射。
+
+        Args:
+            total_chapters: 目录中的总章节数（从 catalog 解析得到）。
+                            传入正确的值可防止下载中断时 total_chapters 残留为 0。
         """
         # 构建卷列表（用于 DB 插入）
         volumes_data = []
-        self._cid_to_volume: Dict[int, int] = {}  # 源站 cid → DB volume_id（临时，保存完即失效）
         for vol_idx, vol in enumerate(self._catalog_data.get("volumes", [])):
             volumes_data.append({
                 "name": vol.get("name", f"第{vol_idx+1}卷"),
                 "sort_order": vol_idx,
             })
-            # DB volume_id = vol_idx + 1（自增，这里先假设连续，保存后从DB读取实际id）
-            for ch in vol.get("chapters", []):
-                self._cid_to_volume[ch["cid"]] = vol_idx + 1
 
         meta = {
             "data_source_id": self.config.data_source_id,
@@ -890,7 +1039,7 @@ class NovelScraper:
             "rating": self._book_data.get("rating", ""),
             "description": self._book_data.get("description", ""),
             "cover_url": self._book_data.get("cover_url", ""),
-            "total_chapters": 0,
+            "total_chapters": total_chapters,
             "completed_chapters": 0,
             "data_source_catalog_url": self.config.catalog_url,
             "data_source_book_url": self.config.book_url,
@@ -898,8 +1047,27 @@ class NovelScraper:
         }
         novel_id = self._db.insert_novel(meta)
 
-        # 从 DB 回读实际的 volume_id，建立源站 cid → volume_id 映射
+        # 从 DB 回读实际 volume_id 并建立映射
+        self._build_volume_mapping(novel_id)
+
+        return novel_id
+
+    def _build_volume_mapping(self, novel_id: int):
+        """重建源站 cid → DB volume_id 的映射
+
+        根据目录数据中的分卷结构和数据库中已有的 volumes 记录，
+        为每个章节的源站 cid 匹配正确的 DB volume_id。
+
+        使用场景：
+        - 首次下载：_ensure_novel_record() 插入 volumes 后调用
+        - 断点恢复：run() 检测到已有 novel 记录后调用，防止 volume_id=NULL
+
+        Args:
+            novel_id: 本站小说 ID
+        """
         self._cid_to_volume: Dict[int, int] = {}
+
+        # 1. 从 DB 读取已有的卷记录
         with self._db._conn.cursor() as cur:
             cur.execute(
                 "SELECT id, sort_order FROM volumes WHERE novel_id = %s ORDER BY sort_order",
@@ -907,14 +1075,31 @@ class NovelScraper:
             )
             db_volumes = {row["sort_order"]: row["id"] for row in cur.fetchall()}
 
-        # 重建映射：源站 cid → DB volume_id
+        # 2. 如果 DB 中没有卷记录（首次下载时由 insert_novel 创建），
+        #    从目录数据重新插入
+        if not db_volumes:
+            volumes_data = []
+            for vol_idx, vol in enumerate(self._catalog_data.get("volumes", [])):
+                volumes_data.append({
+                    "name": vol.get("name", f"第{vol_idx+1}卷"),
+                    "sort_order": vol_idx,
+                })
+            if volumes_data:
+                with self._db._conn.cursor() as cur:
+                    for i, vol in enumerate(volumes_data):
+                        cur.execute(
+                            "INSERT INTO volumes (novel_id, name, sort_order) VALUES (%s, %s, %s) RETURNING id",
+                            (novel_id, vol.get("name", ""), i),
+                        )
+                        db_volumes[i] = cur.fetchone()["id"]
+                self._db._conn.commit()
+
+        # 3. 建立 源站 cid → DB volume_id 映射
         for vol_idx, vol in enumerate(self._catalog_data.get("volumes", [])):
             actual_vol_id = db_volumes.get(vol_idx)
             if actual_vol_id:
                 for ch in vol.get("chapters", []):
                     self._cid_to_volume[ch["cid"]] = actual_vol_id
-
-        return novel_id
 
     def _get_volume_id(self, source_cid: int) -> Optional[int]:
         """根据源站 cid 查找所属卷的 DB volume_id"""

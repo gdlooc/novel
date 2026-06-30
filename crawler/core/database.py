@@ -23,6 +23,11 @@ import psycopg2.extras
 # 配置
 # ═══════════════════════════════════════════════════════════════
 
+# 评分等级映射：wenku8 热度评级 → 数字（越小越高）
+# 用于范围查询——"A级以上"匹配 S级 和 A级
+# 注意：键值带"级"后缀，与 parser_book.py 提取的值（"S级"/"A级"等）一致
+RATING_ORDER = {"S级": 1, "A级": 2, "B级": 3, "C级": 4, "D级": 5, "E级": 6}
+
 # 默认连接参数（从环境变量读取，无则用默认）
 _DEFAULT_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -139,6 +144,23 @@ class NovelDB:
                     failed_source_cids    JSONB DEFAULT '[]',
                     updated_at            TIMESTAMPTZ DEFAULT NOW()
                 );
+
+                -- ═══════════════════════════════════════════════════════════════
+                -- 全站索引表：存储发现的所有小说（尚未全部下载）
+                -- ═══════════════════════════════════════════════════════════════
+                CREATE TABLE IF NOT EXISTS site_novels (
+                    id               SERIAL PRIMARY KEY,
+                    data_source_aid  INTEGER NOT NULL UNIQUE,  -- 源站小说 ID（wenku8）
+                    title            TEXT NOT NULL,
+                    url              TEXT DEFAULT '',
+                    tags             TEXT[],           -- 标签数组（初始为空，下载后补充）
+                    status           TEXT DEFAULT '',  -- 状态（连载中/已完结）
+                    rating           TEXT DEFAULT '',  -- 评级（S/A/B/C/D）
+                    is_downloaded    BOOLEAN DEFAULT FALSE,   -- 是否已下载
+                    downloaded_aid   INTEGER REFERENCES novels(id),  -- 关联已下载的小说 ID
+                    discovered_at    TIMESTAMPTZ DEFAULT NOW(),
+                    last_checked     TIMESTAMPTZ DEFAULT NOW()
+                );
             """)
 
             # 索引
@@ -148,6 +170,9 @@ class NovelDB:
                 CREATE INDEX IF NOT EXISTS idx_chapter_images_chapter ON chapter_images(chapter_id);
                 CREATE INDEX IF NOT EXISTS idx_novel_tags_novel ON novel_tags(novel_id);
                 CREATE INDEX IF NOT EXISTS idx_novels_source ON novels(data_source_id, data_source_aid);
+                CREATE INDEX IF NOT EXISTS idx_site_novels_aid ON site_novels(data_source_aid);
+                CREATE INDEX IF NOT EXISTS idx_site_novels_downloaded ON site_novels(is_downloaded);
+                CREATE INDEX IF NOT EXISTS idx_site_novels_tags ON site_novels USING GIN(tags);
             """)
 
             # 插入默认数据源（wenku8）
@@ -275,6 +300,394 @@ class NovelDB:
                 (data_source_id,),
             )
             return {r["data_source_aid"] for r in cur.fetchall()}
+
+    # ═══════════════════════════════════════════════════════════════
+    # 全站索引 CRUD（site_novels 表）
+    # ═══════════════════════════════════════════════════════════════
+
+    def upsert_site_novel(self, data_source_aid: int, title: str, url: str = "") -> int:
+        """插入或更新全站索引小说，返回 site_novel id
+
+        用于 discover.py 发现小说时写入数据库。
+        如果已存在则更新 title/url/last_checked，不覆盖其他字段。
+
+        Args:
+            data_source_aid: 源站小说 ID
+            title: 小说标题
+            url: 小说详情页 URL
+        """
+        with self._conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO site_novels (data_source_aid, title, url, last_checked)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (data_source_aid)
+                DO UPDATE SET
+                    title = EXCLUDED.title,
+                    url = EXCLUDED.url,
+                    last_checked = EXCLUDED.last_checked
+                RETURNING id
+            """, (data_source_aid, title, url))
+            site_id = cur.fetchone()["id"]
+        self._conn.commit()
+        return site_id
+
+    def batch_upsert_site_novels(self, novels: List[Dict]):
+        """批量插入或更新全站索引小说
+
+        Args:
+            novels: 小说列表，每项包含 data_source_aid, title, url
+        """
+        with self._conn.cursor() as cur:
+            for novel in novels:
+                cur.execute("""
+                    INSERT INTO site_novels (data_source_aid, title, url, last_checked)
+                    VALUES (%(data_source_aid)s, %(title)s, %(url)s, NOW())
+                    ON CONFLICT (data_source_aid)
+                    DO UPDATE SET
+                        title = EXCLUDED.title,
+                        url = EXCLUDED.url,
+                        last_checked = EXCLUDED.last_checked
+                """, novel)
+        self._conn.commit()
+
+    def mark_site_novel_downloaded(self, data_source_aid: int, downloaded_aid: int):
+        """标记全站索引中的小说为已下载
+
+        Args:
+            data_source_aid: 源站小说 ID
+            downloaded_aid: 已下载小说的本站 ID（ novels.id ）
+        """
+        with self._conn.cursor() as cur:
+            cur.execute("""
+                UPDATE site_novels
+                SET is_downloaded = TRUE,
+                    downloaded_aid = %s,
+                    last_checked = NOW()
+                WHERE data_source_aid = %s
+            """, (downloaded_aid, data_source_aid))
+        self._conn.commit()
+
+    def sync_site_novel_from_novel(self, novel_id: int):
+        """从 novels 表反向同步 tags/status/rating 到 site_novels 表
+
+        下载完成后调用，确保 site_novels 中的元数据与 novels 表一致。
+        同时标记 is_downloaded = TRUE 和设置 downloaded_aid。
+
+        设计意图：
+        - discover.py 发现小说时只写入 data_source_aid/title/url
+        - tags/status/rating 需下载书页后才能获取
+        - 下载完成后调用此方法回填 site_novels 的元数据
+        - 这样 site_novels 就能支持按标签/状态/评级筛选
+
+        Args:
+            novel_id: 本站小说 ID（novels.id）
+        """
+        with self._conn.cursor() as cur:
+            # 从 novels 表读取元数据 + 标签
+            cur.execute("""
+                SELECT
+                    n.data_source_aid,
+                    n.status,
+                    n.rating,
+                    n.is_completed,
+                    ARRAY(SELECT tag FROM novel_tags WHERE novel_id = n.id) AS tags
+                FROM novels n
+                WHERE n.id = %s
+            """, (novel_id,))
+            row = cur.fetchone()
+            if not row:
+                return  # 小说不存在，静默返回
+
+            # 回写 site_novels：更新 tags、status、rating，同时标记已下载
+            cur.execute("""
+                UPDATE site_novels
+                SET tags = %(tags)s,
+                    status = %(status)s,
+                    rating = %(rating)s,
+                    is_downloaded = TRUE,
+                    downloaded_aid = %(downloaded_aid)s,
+                    last_checked = NOW()
+                WHERE data_source_aid = %(data_source_aid)s
+            """, {
+                "tags": row["tags"] or [],
+                "status": row["status"] or "",
+                "rating": row["rating"] or "",
+                "downloaded_aid": novel_id,
+                "data_source_aid": row["data_source_aid"],
+            })
+
+        self._conn.commit()
+
+    def update_site_novel_metadata(
+        self,
+        data_source_aid: int,
+        rating: str = "",
+        tags: Optional[List[str]] = None,
+        status: str = "",
+    ):
+        """更新 site_novels 的元数据字段（rating/tags/status）
+
+        用于 scan_metadata.py 预扫描书页后回填元数据。
+        仅请求书页 HTML 而不下载章节，提取 rating/tags/status 后更新。
+
+        设计意图：
+        - discover.py 发现阶段 site_novels 的 rating/tags/status 为空
+        - scan_metadata.py 轻量请求书页后调用此方法回填
+        - 回填后 site_novels 即可支持按评分/标签/状态筛选
+
+        Args:
+            data_source_aid: 源站小说 ID
+            rating: 评级（如 "S级"）
+            tags: 标签列表
+            status: 状态（如 "连载中"）
+        """
+        with self._conn.cursor() as cur:
+            cur.execute("""
+                UPDATE site_novels
+                SET rating = %(rating)s,
+                    tags = %(tags)s,
+                    status = %(status)s,
+                    last_checked = NOW()
+                WHERE data_source_aid = %(data_source_aid)s
+            """, {
+                "rating": rating,
+                "tags": tags or [],
+                "status": status,
+                "data_source_aid": data_source_aid,
+            })
+        self._conn.commit()
+
+    def get_site_novels_needing_scan(
+        self,
+        limit: Optional[int] = None,
+        force: bool = False,
+    ) -> List[Dict]:
+        """获取需要元数据扫描的小说列表
+
+        用于 scan_metadata.py 获取待扫描的小说。
+        默认只返回 rating 为空的行（未扫描过的），force=True 时返回全部。
+
+        Args:
+            limit: 限制返回数量
+            force: True=返回全部（即使已有 rating），False=仅返回 rating 为空的行
+
+        Returns:
+            小说列表，每项含 data_source_aid, title, url
+        """
+        with self._conn.cursor() as cur:
+            if force:
+                cur.execute("""
+                    SELECT data_source_aid, title, url FROM site_novels
+                    ORDER BY id
+                    LIMIT %s
+                """, (limit or 10000,))
+            else:
+                cur.execute("""
+                    SELECT data_source_aid, title, url FROM site_novels
+                    WHERE rating = '' OR rating IS NULL
+                    ORDER BY id
+                    LIMIT %s
+                """, (limit or 10000,))
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_site_novel(self, data_source_aid: int) -> Optional[Dict]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM site_novels WHERE data_source_aid = %s",
+                (data_source_aid,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_site_novels(
+        self,
+        downloaded: Optional[bool] = None,
+        tags: Optional[List[str]] = None,
+        status: Optional[str] = None,
+        min_rating: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> Tuple[List[Dict], int]:
+        """获取全站索引小说列表，支持筛选和分页
+
+        Args:
+            downloaded: None=全部, True=已下载, False=未下载
+            tags: 按标签过滤（任意匹配）
+            status: 按状态过滤
+            min_rating: 最低评级（如 "A" 表示匹配 S 和 A 级，含空字符串的未扫描小说）
+            offset: 分页偏移
+            limit: 每页数量
+
+        Returns:
+            (novels_list, total_count)
+        """
+        where_clauses = []
+        params = {"offset": offset, "limit": limit}
+
+        if downloaded is not None:
+            where_clauses.append("is_downloaded = %(downloaded)s")
+            params["downloaded"] = downloaded
+
+        if status:
+            where_clauses.append("status = %(status)s")
+            params["status"] = status
+
+        if min_rating:
+            # 评分范围查询：计算所有 >= 目标等级的评分值
+            # 归一化输入：支持 "S" 和 "S级" 两种写法
+            rating_key = min_rating if min_rating.endswith("级") else min_rating + "级"
+            target_order = RATING_ORDER.get(rating_key)
+            if target_order is not None:
+                allowed = [k for k, v in RATING_ORDER.items() if v <= target_order]
+                where_clauses.append("(rating = ANY(%(allowed_ratings)s) OR rating = '')")
+                params["allowed_ratings"] = allowed
+
+        if tags:
+            # tags 数组字段包含任意一个匹配标签
+            where_clauses.append("tags && %(tags)s::text[]")
+            params["tags"] = tags
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        with self._conn.cursor() as cur:
+            # 总数
+            cur.execute(f"SELECT COUNT(*) as total FROM site_novels {where_sql}", params)
+            total = cur.fetchone()["total"]
+
+            # 分页数据
+            cur.execute(f"""
+                SELECT * FROM site_novels {where_sql}
+                ORDER BY discovered_at DESC
+                LIMIT %(limit)s OFFSET %(offset)s
+            """, params)
+            novels = [dict(row) for row in cur.fetchall()]
+
+        return novels, total
+
+    def search_catalog(
+        self,
+        query: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        status: Optional[str] = None,
+        min_rating: Optional[str] = None,
+        downloaded: Optional[bool] = None,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> Tuple[List[Dict], int]:
+        """搜索全站小说目录，支持标题搜索 + 多条件筛选 + 分页
+
+        与 get_site_novels 的区别：
+        - 支持标题模糊搜索（ILIKE）
+        - LEFT JOIN novels 表获取已下载小说的作者/封面/章节数
+        - 返回更丰富的卡片展示所需字段
+
+        Args:
+            query: 标题搜索关键词（ILIKE 模糊匹配）
+            tags: 按标签过滤（任意匹配）
+            status: 按状态过滤
+            min_rating: 最低评级（如 "A" 表示匹配 S 和 A 级）
+            downloaded: None=全部, True=仅已下载, False=仅未下载
+            offset: 分页偏移
+            limit: 每页数量
+
+        Returns:
+            (enriched_novels_list, total_count)
+        """
+        where_clauses = []
+        params = {"offset": offset, "limit": limit}
+
+        if query:
+            where_clauses.append("s.title ILIKE %(query)s")
+            params["query"] = f"%{query}%"
+
+        if downloaded is not None:
+            where_clauses.append("s.is_downloaded = %(downloaded)s")
+            params["downloaded"] = downloaded
+
+        if status:
+            where_clauses.append("s.status = %(status)s")
+            params["status"] = status
+
+        if min_rating:
+            # 评分范围查询：计算所有 >= 目标等级的评分值
+            # 归一化输入：支持 "S" 和 "S级" 两种写法
+            rating_key = min_rating if min_rating.endswith("级") else min_rating + "级"
+            target_order = RATING_ORDER.get(rating_key)
+            if target_order is not None:
+                allowed = [k for k, v in RATING_ORDER.items() if v <= target_order]
+                where_clauses.append("(s.rating = ANY(%(allowed_ratings)s) OR s.rating = '')")
+                params["allowed_ratings"] = allowed
+
+        if tags:
+            where_clauses.append("s.tags && %(tags)s::text[]")
+            params["tags"] = tags
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        with self._conn.cursor() as cur:
+            # 总数
+            cur.execute(
+                f"SELECT COUNT(*) as total FROM site_novels s {where_sql}", params
+            )
+            total = cur.fetchone()["total"]
+
+            # 分页数据：LEFT JOIN novels 获取已下载小说的补充信息
+            cur.execute(
+                f"""
+                SELECT
+                    s.data_source_aid,
+                    s.title,
+                    s.url,
+                    s.tags,
+                    s.status,
+                    s.rating,
+                    s.is_downloaded,
+                    s.downloaded_aid,
+                    n.author,
+                    n.cover_url,
+                    n.total_chapters,
+                    n.word_count,
+                    n.description
+                FROM site_novels s
+                LEFT JOIN novels n ON s.downloaded_aid = n.id
+                {where_sql}
+                ORDER BY s.is_downloaded DESC, s.discovered_at DESC
+                LIMIT %(limit)s OFFSET %(offset)s
+                """,
+                params,
+            )
+            novels = [dict(row) for row in cur.fetchall()]
+
+        return novels, total
+
+    def get_all_site_novels(self, downloaded_only: bool = False) -> List[Dict]:
+        """获取所有全站索引小说
+
+        Args:
+            downloaded_only: True=仅已下载, False=全部
+
+        Returns:
+            小说列表
+        """
+        with self._conn.cursor() as cur:
+            if downloaded_only:
+                cur.execute("SELECT * FROM site_novels WHERE is_downloaded = TRUE ORDER BY id")
+            else:
+                cur.execute("SELECT * FROM site_novels ORDER BY id")
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_site_novels_count(self) -> Dict[str, int]:
+        """获取全站索引统计信息"""
+        with self._conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE is_downloaded = TRUE) as downloaded,
+                    COUNT(*) FILTER (WHERE is_downloaded = FALSE) as pending
+                FROM site_novels
+            """)
+            row = cur.fetchone()
+            return dict(row) if row else {"total": 0, "downloaded": 0, "pending": 0}
 
     # ─── 章节 CRUD ───
 
@@ -445,7 +858,7 @@ class NovelDB:
                 result[local_cid] = (prev_val, next_val)
         return result
 
-    # ─── 导出：DB → JSON 文件（canvas-reader 兼容）───
+    # ─── 导出：DB → JSON 文件（novel-frontend 兼容）───
 
     def export_to_json(self, novel_id: int, output_dir: str):
         """将数据库中指定小说导出为 JSON 文件结构

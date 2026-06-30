@@ -84,16 +84,6 @@ class BookParser:
             "is_completed": self._extract_is_completed(),
         }
 
-    def to_json(self, filepath: str):
-        """解析并输出为 JSON 文件"""
-        import json
-        result = self.parse()
-        Path(filepath).write_text(
-            json.dumps(result, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return result
-
     # ---------- 私有方法：基本信息 ----------
 
     def _extract_title(self) -> str:

@@ -17,6 +17,12 @@ venv/
 crawler/output/
 crawler/novels/
 
+# === 认证凭据（敏感信息）===
+crawler/.auth_cookies.json
+
+# === 爬虫运行时文件 ===
+crawler/logs/
+
 # === IDE ===
 .vscode/
 .idea/
