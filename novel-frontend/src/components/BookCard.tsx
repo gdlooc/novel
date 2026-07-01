@@ -2,7 +2,7 @@
  * BookCard — 书籍卡片组件。
  *
  * 在书库、搜索等页面展示书籍摘要信息。
- * 结构：封面占位（首字）+ 书名 + 作者 + 可选进度条。
+ * 结构：封面占位（首字）+ 书名 + 作者 + 标签 + 可选进度条。
  *
  * @param title - 书名
  * @param author - 作者
@@ -11,10 +11,10 @@
  * @param tags - 标签列表（可选）
  * @param onClick - 点击回调
  */
-
 import React from 'react';
-import { useSettingsStore } from '@store/settingsStore';
-import { getThemeById } from '@engine/render/ThemeApplicator';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
 
 export interface BookCardProps {
   title: string;
@@ -33,103 +33,52 @@ export const BookCard: React.FC<BookCardProps> = ({
   tags,
   onClick,
 }) => {
-  const theme = useSettingsStore((s) => s.theme);
-  const colors = getThemeById(theme).cssVariables;
-
   /** 提取书名首字作为封面占位 */
   const firstChar = title.replace(/[\[\]【】《》「」\s]/g, '').charAt(0) || '书';
 
   return (
-    <button
+    <Button
+      variant="ghost"
       onClick={onClick}
-      style={{
-        display: 'flex',
-        gap: 12,
-        padding: '12px',
-        border: `1px solid ${colors['ui-border']}`,
-        borderRadius: 10,
-        background: colors['ui-background-secondary'],
-        cursor: 'pointer',
-        width: '100%',
-        textAlign: 'left',
-        color: colors['ui-text'],
-      }}
+      className="flex gap-3 p-3 w-full h-auto text-left justify-start border border-border rounded-[10px] bg-card hover:bg-accent"
     >
-      {/* 封面占位 */}
-      <div style={{
-        width: 56,
-        height: 76,
-        flexShrink: 0,
-        borderRadius: 6,
-        background: coverUrl
-          ? `url(${coverUrl}) center/cover`
-          : `linear-gradient(135deg, ${colors['ui-accent']}50, ${colors['ui-accent']}20)`,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: 26,
-        fontWeight: 700,
-        color: colors['ui-accent'],
-      }}>
+      {/* 封面占位 — 首字或图片 */}
+      <div
+        className="w-14 h-[76px] flex-shrink-0 rounded-md flex items-center justify-center text-[26px] font-bold text-primary"
+        style={{
+          background: coverUrl
+            ? `url(${coverUrl}) center/cover`
+            : undefined,
+        }}
+      >
         {!coverUrl && firstChar}
       </div>
 
       {/* 信息区 */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{
-          fontSize: 15,
-          fontWeight: 600,
-          marginBottom: 4,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
+      <div className="flex-1 min-w-0">
+        <div className="text-[15px] font-semibold mb-1 truncate">
           {title}
         </div>
         {author && (
-          <div style={{
-            fontSize: 12,
-            color: colors['ui-text-secondary'],
-            marginBottom: 6,
-          }}>
+          <div className="text-xs text-muted-foreground mb-1.5">
             {author}
           </div>
         )}
         {/* 标签 */}
         {tags && tags.length > 0 && (
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 6 }}>
+          <div className="flex gap-1 flex-wrap mb-1.5">
             {tags.slice(0, 3).map((tag) => (
-              <span key={tag} style={{
-                padding: '1px 6px',
-                borderRadius: 4,
-                background: colors['ui-background'],
-                color: colors['ui-text-secondary'],
-                fontSize: 10,
-                border: `1px solid ${colors['ui-border']}`,
-              }}>
+              <Badge key={tag} variant="outline" className="text-[10px] py-0 px-1.5">
                 {tag}
-              </span>
+              </Badge>
             ))}
           </div>
         )}
         {/* 进度条 */}
         {progress !== undefined && progress > 0 && (
-          <div style={{
-            height: 3,
-            borderRadius: 2,
-            background: colors['ui-border'],
-            overflow: 'hidden',
-          }}>
-            <div style={{
-              height: '100%',
-              width: `${Math.round(progress * 100)}%`,
-              background: colors['ui-accent'],
-              borderRadius: 2,
-              transition: 'width 0.3s',
-            }} />
-          </div>
+          <Progress value={Math.round(progress * 100)} className="h-[3px]" />
         )}
       </div>
-    </button>
+    </Button>
   );
 };

@@ -301,9 +301,16 @@ export function useReader({
           nav.chapters[0]?.chapterId;
 
         if (startChapterId) {
+          // ── 关键修复：仅当目标章节与保存的进度章节相同时，才沿用旧进度位置 ──
+          // 否则（如从目录点击新章节打开），应从该章节开头开始。
+          const isResumingSavedChapter =
+            !initialChapterId || initialChapterId === savedProgress?.chapterId;
+
           // charOffset/pageIndex 优先用导航 state，回退到保存的进度
-          const targetPageIndex = initialPageIndex ?? savedProgress?.pageIndex;
-          const targetCharOffset = initialCharOffset ?? savedProgress?.charOffset;
+          const targetPageIndex = initialPageIndex
+            ?? (isResumingSavedChapter ? savedProgress?.pageIndex : undefined);
+          const targetCharOffset = initialCharOffset
+            ?? (isResumingSavedChapter ? savedProgress?.charOffset : undefined);
 
           await goToChapter(
             startChapterId,
@@ -311,15 +318,16 @@ export function useReader({
             targetCharOffset,
           );
 
-          // 滚动模式：恢复滚动位置
-          // 导航 state 的 scrollOffset 优先（用户从详情页目录点击时通常不设置）
+          // 滚动模式：恢复滚动位置（导航 state 优先）
           const scrollToRestore =
             initialScrollOffset ?? savedProgress?.scrollOffset;
-          if (scrollToRestore !== undefined && savedProgress?.layoutConfigHash) {
-            const config = getLayoutConfig();
-            if (config && hashLayoutConfig(config) === savedProgress.layoutConfigHash) {
-              store.setPendingScrollRestore(scrollToRestore);
-            }
+          // ── 修复：不再严格要求 layoutConfigHash 匹配，直接恢复 scrollOffset ──
+          // 即使配置稍有变化，恢复比不恢复好（会被 clamp 到有效范围）。
+          if (
+            scrollToRestore !== undefined &&
+            isResumingSavedChapter
+          ) {
+            store.setPendingScrollRestore(scrollToRestore);
           }
         } else {
           store.setStatus('error', '没有找到可读章节');

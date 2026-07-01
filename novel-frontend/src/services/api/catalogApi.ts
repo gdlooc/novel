@@ -85,6 +85,14 @@ export interface DownloadedBook {
   tags: string[];
 }
 
+/** /api/catalog/filters 返回的筛选选项 */
+export interface FilterOptions {
+  statuses: string[];
+  ratings: string[];
+  tags: string[];
+  tag_options: { label: string; value: string }[];
+}
+
 /** fetchCatalog 的查询参数 */
 export interface CatalogParams {
   /** 标题搜索关键词 */
@@ -139,6 +147,22 @@ export async function fetchCatalog(
   }
 
   return resp.json() as Promise<CatalogResponse>;
+}
+
+/**
+ * 获取所有可用的筛选选项（标签、状态、评级）。
+ *
+ * 数据来自 site_novels 表的实际 DISTINCT 值，
+ * 用于前端构建筛选面板。
+ */
+export async function fetchFilters(): Promise<FilterOptions> {
+  const resp = await fetch(`${API_BASE}/catalog/filters`);
+
+  if (!resp.ok) {
+    throw new Error(`获取筛选选项失败 (HTTP ${resp.status})`);
+  }
+
+  return resp.json() as Promise<FilterOptions>;
 }
 
 /**

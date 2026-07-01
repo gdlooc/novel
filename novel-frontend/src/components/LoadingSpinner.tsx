@@ -1,13 +1,12 @@
 /**
  * LoadingSpinner — 通用加载指示器。
  *
+ * 使用 Tailwind 内置 animate-spin 动画，无需自定义 keyframes。
+ *
  * @param message - 加载提示文字，默认"加载中..."
- * @param size - 旋转环大小（px），默认 32
+ * @param size - 旋转环大小（px），默认 32，通过行内 style 控制
  */
-
 import React from 'react';
-import { useSettingsStore } from '@store/settingsStore';
-import { getThemeById } from '@engine/render/ThemeApplicator';
 
 export interface LoadingSpinnerProps {
   message?: string;
@@ -18,33 +17,14 @@ export const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
   message = '加载中...',
   size = 32,
 }) => {
-  const theme = useSettingsStore((s) => s.theme);
-  const colors = getThemeById(theme).cssVariables;
-
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: 32,
-      color: colors['ui-text-secondary'],
-    }}>
-      <div style={{
-        width: size,
-        height: size,
-        border: `3px solid ${colors['ui-border']}`,
-        borderTopColor: colors['ui-accent'],
-        borderRadius: '50%',
-        animation: 'spin 0.8s linear infinite',
-        marginBottom: 12,
-      }} />
-      <div style={{ fontSize: 14 }}>{message}</div>
-      <style>{`
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
+    <div className="flex flex-col items-center justify-center p-8 text-muted-foreground">
+      {/* 旋转环 — 使用 Tailwind 内置 animate-spin */}
+      <div
+        style={{ width: size, height: size }}
+        className="border-[3px] border-border border-t-primary rounded-full animate-spin mb-3"
+      />
+      <div className="text-sm">{message}</div>
     </div>
   );
 };

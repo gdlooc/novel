@@ -1,18 +1,14 @@
 /**
- * TocPanel — Slide-up table of contents with volume/chapter hierarchy.
+ * TocPanel — 目录滑出面板。
  *
- * Supports:
- * - Volume grouping
- * - Current chapter highlight
- * - Tap to navigate
+ * 展示分卷分组的章节目录，当前章节高亮，点击跳转。
+ * 打开时自动滚动到当前阅读章节。
  */
-
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
+import { X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { useReaderStore } from '@store/readerStore';
 import { useUIStore } from '@store/uiStore';
-import { getThemeById } from '@engine/render/ThemeApplicator';
-import { useSettingsStore } from '@store/settingsStore';
-import type { TocEntry } from '@book/types';
 
 interface TocPanelProps {
   onChapterSelect: (chapterId: string) => void;
@@ -22,88 +18,67 @@ export const TocPanel: React.FC<TocPanelProps> = ({ onChapterSelect }) => {
   const chapterNav = useReaderStore((s) => s.chapterNav);
   const currentChapterId = useReaderStore((s) => s.chapterId);
   const { setShowToc } = useUIStore();
-  const theme = useSettingsStore((s) => s.theme);
-  const colors = getThemeById(theme).cssVariables;
+
+  /** 面板的滚动容器 ref，用于打开时定位到当前章节 */
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const handleSelect = (chapterId: string) => {
     setShowToc(false);
     onChapterSelect(chapterId);
   };
 
+  /** 面板打开时，自动滚动到当前阅读章节 */
+  useEffect(() => {
+    if (!panelRef.current || !currentChapterId) return;
+
+    // 短延迟等待浏览器完成布局渲染
+    const timer = setTimeout(() => {
+      const currentEl = panelRef.current?.querySelector(
+        `[data-chapter-id="${currentChapterId}"]`,
+      );
+      if (currentEl) {
+        currentEl.scrollIntoView({
+          behavior: 'instant',
+          block: 'center',
+        });
+      }
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [currentChapterId]);
+
   if (!chapterNav) return null;
 
-  // Build display entries from the navigation
   const displayEntries = buildDisplayEntries(chapterNav);
-
-  const panelStyle: React.CSSProperties = {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    zIndex: 200,
-    maxHeight: '75vh',
-    overflowY: 'auto',
-    background: colors['ui-background'],
-    borderTop: `1px solid ${colors['ui-border']}`,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    padding: '20px 16px',
-    paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
-    color: colors['ui-text'],
-    boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
-  };
 
   return (
     <>
+      {/* Backdrop */}
       <div
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          zIndex: 199,
-          background: 'rgba(0,0,0,0.3)',
-        }}
+        className="fixed inset-0 z-[199] bg-black/30"
         onClick={() => setShowToc(false)}
       />
 
-      <div style={panelStyle}>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 16,
-          }}
-        >
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>目录</h2>
-          <button
-            onClick={() => setShowToc(false)}
-            style={{
-              background: 'none',
-              border: 'none',
-              fontSize: 20,
-              color: colors['ui-text-secondary'],
-              cursor: 'pointer',
-            }}
-          >
-            ✕
-          </button>
+      {/* Panel */}
+      <div
+        ref={panelRef}
+        className="absolute bottom-0 left-0 right-0 z-[200] max-h-[75vh] overflow-y-auto bg-background border-t border-border rounded-t-2xl p-5 shadow-[0_-4px_20px_rgba(0,0,0,0.15)] text-foreground"
+        style={{ paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))' }}
+      >
+        {/* 标题栏 */}
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-lg font-semibold">目录</h2>
+          <Button variant="ghost" size="icon" onClick={() => setShowToc(false)}>
+            <X className="w-5 h-5" />
+          </Button>
         </div>
 
-        {/* Chapter count */}
-        <div
-          style={{
-            fontSize: 12,
-            color: colors['ui-text-secondary'],
-            marginBottom: 12,
-          }}
-        >
+        {/* 章节总数 */}
+        <div className="text-xs text-muted-foreground mb-3">
           共 {chapterNav.totalChapters} 章
         </div>
 
-        {/* Entry list */}
+        {/* 章节列表 */}
         <div>
           {displayEntries.map((entry) => {
             const isCurrent = entry.chapterId === currentChapterId;
@@ -112,28 +87,21 @@ export const TocPanel: React.FC<TocPanelProps> = ({ onChapterSelect }) => {
             return (
               <div
                 key={entry.chapterId}
+                data-chapter-id={entry.chapterId}
                 onClick={() => {
                   if (!isVolume && entry.chapterId) {
                     handleSelect(entry.chapterId);
                   }
                 }}
-                style={{
-                  padding: isVolume ? '10px 8px 6px' : '8px 8px 8px 24px',
-                  fontSize: isVolume ? 13 : 14,
-                  fontWeight: isVolume ? 600 : isCurrent ? 600 : 400,
-                  color: isCurrent
-                    ? colors['ui-accent']
-                    : isVolume
-                      ? colors['ui-text']
-                      : colors['ui-text'],
-                  background: isCurrent
-                    ? colors['ui-accent'] + '15'
-                    : 'transparent',
-                  borderRadius: 6,
-                  cursor: isVolume ? 'default' : 'pointer',
-                  borderLeft: isCurrent ? `3px solid ${colors['ui-accent']}` : '3px solid transparent',
-                  marginBottom: 2,
-                }}
+                className={`py-2 mb-0.5 rounded-md transition-colors ${
+                  isVolume
+                    ? 'pl-2 text-[13px] font-semibold cursor-default'
+                    : 'pl-6 text-sm cursor-pointer hover:bg-accent'
+                } ${
+                  isCurrent
+                    ? 'bg-primary/10 text-primary border-l-[3px] border-l-primary'
+                    : 'border-l-[3px] border-l-transparent'
+                }`}
               >
                 {entry.title}
               </div>
@@ -145,43 +113,28 @@ export const TocPanel: React.FC<TocPanelProps> = ({ onChapterSelect }) => {
   );
 };
 
-/** Display entry for TOC rendering */
+// ─── 辅助类型和函数 ───
+
 interface DisplayEntry {
   chapterId: string;
   title: string;
   isVolume: boolean;
 }
 
+/** 从 ChapterNav 构建用于展示的条目列表（分卷 + 章节） */
 function buildDisplayEntries(
   nav: NonNullable<ReturnType<typeof useReaderStore.getState>['chapterNav']>,
 ): DisplayEntry[] {
   const entries: DisplayEntry[] = [];
 
-  // The TOC might have a flat or nested structure
   for (const ch of nav.chapters) {
-    // Check if there are children (volume structure)
     if (ch.children && ch.children.length > 0) {
-      // Find the parent volume entry from the raw TOC data
-      // We'll display the volume name, then its children
-      entries.push({
-        chapterId: ch.chapterId,
-        title: ch.title,
-        isVolume: true,
-      });
+      entries.push({ chapterId: ch.chapterId, title: ch.title, isVolume: true });
       for (const child of ch.children) {
-        entries.push({
-          chapterId: child.chapterId,
-          title: child.title,
-          isVolume: false,
-        });
+        entries.push({ chapterId: child.chapterId, title: child.title, isVolume: false });
       }
     } else {
-      // Flat chapter
-      entries.push({
-        chapterId: ch.chapterId,
-        title: ch.title,
-        isVolume: false,
-      });
+      entries.push({ chapterId: ch.chapterId, title: ch.title, isVolume: false });
     }
   }
 

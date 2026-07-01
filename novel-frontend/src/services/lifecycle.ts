@@ -200,33 +200,45 @@ export function clearRecoveryState(): void {
 /** 不可见计时的开始时间（用于检测后台挂了多久） */
 let hiddenSince: number | null = null;
 
-/** 页面变为隐藏时的回调（由 ReaderShell 注册） */
-let onHiddenCallback: (() => void) | null = null;
+/** 页面变为隐藏时的回调集合（支持多个注册者同时监听） */
+const onHiddenCallbacks = new Set<() => void>();
 
-/** 注册页面隐藏回调（用于保存阅读进度） */
+/**
+ * 触发所有已注册的页面隐藏回调。
+ * 在 visibilitychange(hidden) / pagehide / freeze / beforeunload 时调用。
+ * 使用 try-catch 确保一个回调失败不影响其他。
+ */
+function triggerHiddenCallbacks(): void {
+  for (const cb of onHiddenCallbacks) {
+    try { cb(); } catch (err) { console.warn('[Lifecycle] 隐藏回调执行失败:', err); }
+  }
+}
+
+/**
+ * 注册页面隐藏回调（用于切后台/锁屏时保存阅读进度和恢复状态）。
+ *
+ * @returns 取消注册函数
+ */
 export function onPageHidden(callback: () => void): () => void {
-  onHiddenCallback = callback;
+  onHiddenCallbacks.add(callback);
   return () => {
-    if (onHiddenCallback === callback) onHiddenCallback = null;
+    onHiddenCallbacks.delete(callback);
   };
 }
 
 /** 初始化可见性监听 */
 function initVisibilityListener(): void {
+  // ── visibilitychange：切后台/锁屏 ──
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
-      // 页面进入后台 / 锁屏
       hiddenSince = Date.now();
-      // 触发保存回调（阅读进度、当前路由等）
-      if (onHiddenCallback) onHiddenCallback();
+      triggerHiddenCallbacks();
       console.log('[Lifecycle] 页面进入后台');
     } else {
-      // 页面恢复可见
       const hiddenDuration = hiddenSince ? Date.now() - hiddenSince : 0;
       hiddenSince = null;
 
       if (hiddenDuration > 5000) {
-        // 超过 5 秒 → 可能经历了浏览器挂起/恢复
         console.log(
           `[Lifecycle] 页面恢复可见（后台 ${(hiddenDuration / 1000).toFixed(0)}s）`,
         );
@@ -234,22 +246,34 @@ function initVisibilityListener(): void {
     }
   });
 
-  // pagehide 事件：页面即将被关闭/缓存，做最后的保存
-  // 注意：移动 Safari 中 pagehide 比 visibilitychange(hidden) 更可靠
+  // ── pagehide：页面即将被关闭/缓存 ──
+  // 移动 Safari 中 pagehide 比 visibilitychange(hidden) 更可靠
   window.addEventListener('pagehide', () => {
-    if (onHiddenCallback) onHiddenCallback();
+    triggerHiddenCallbacks();
     console.log('[Lifecycle] pagehide — 最终保存');
   });
 
-  // freeze 事件：浏览器即将冻结页面（Page Lifecycle API）
-  // 在此事件中做最后的持久化保存
+  // ── freeze：浏览器即将冻结页面（Page Lifecycle API）──
   document.addEventListener('freeze', () => {
-    if (onHiddenCallback) onHiddenCallback();
+    triggerHiddenCallbacks();
     console.log('[Lifecycle] freeze — 页面即将冻结，已保存状态');
   });
 
-  // resume 事件：页面从冻结中恢复
+  // ── beforeunload：页面卸载前的最终保存（同步执行）──
+  // 注意：此事件中不能使用异步 API（fetch、IndexedDB 异步写入等），
+  // 但 localStorage.setItem 是同步的，可以安全使用。
+  let beforeUnloadFired = false;
+  window.addEventListener('beforeunload', () => {
+    // 防止 pagehide 重复触发（部分浏览器两者都触发）
+    if (beforeUnloadFired) return;
+    beforeUnloadFired = true;
+    triggerHiddenCallbacks();
+    console.log('[Lifecycle] beforeunload — 同步保存');
+  });
+
+  // ── resume：页面从冻结中恢复 ──
   document.addEventListener('resume', () => {
+    beforeUnloadFired = false;
     console.log('[Lifecycle] resume — 页面从冻结中恢复');
   });
 }

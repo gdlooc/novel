@@ -5,6 +5,11 @@
  * Themes affect:
  * 1. Canvas rendering (colors passed to PagePainter)
  * 2. React UI (CSS custom properties on :root)
+ *
+ * 配色方案基于 bilibili APP 风格：
+ * - 品牌主色 #FB7299（bilibili 粉）
+ * - 文字主色 #18191C（浅色）/ #E8E8EA（深色）
+ * - 背景层次分明，圆角卡片风格
  */
 
 import type { RenderTheme } from './types';
@@ -24,72 +29,72 @@ export function getThemeMetaColor(theme: RenderTheme): string {
   return theme.backgroundColor;
 }
 
-/** Built-in light theme */
+/** Built-in light theme — bilibili 风格 */
 export const LIGHT_THEME: RenderTheme = {
   id: 'light',
   name: '浅色模式',
-  backgroundColor: '#F5F5F5',
-  textColor: '#1A1A1A',
-  textColorSecondary: '#8C8C8C',
-  selectionColor: 'rgba(74, 144, 217, 0.3)',
-  accentColor: '#4A90D9',
+  backgroundColor: '#F6F7F8',
+  textColor: '#18191C',
+  textColorSecondary: '#9499A0',
+  selectionColor: 'rgba(251, 114, 153, 0.25)',
+  accentColor: '#FB7299',
   cssVariables: {
     'ui-background': '#FFFFFF',
-    'ui-background-secondary': '#F0F0F0',
-    'ui-text': '#1A1A1A',
-    'ui-text-secondary': '#6B6B6B',
-    'ui-border': '#E0E0E0',
-    'ui-accent': '#4A90D9',
-    'ui-overlay': 'rgba(0, 0, 0, 0.05)',
-    'ui-danger': '#E74C3C',
-    'ui-slider-track': '#D0D0D0',
-    'ui-slider-fill': '#4A90D9',
+    'ui-background-secondary': '#F6F7F8',
+    'ui-text': '#18191C',
+    'ui-text-secondary': '#9499A0',
+    'ui-border': '#E3E5E7',
+    'ui-accent': '#FB7299',
+    'ui-overlay': 'rgba(251, 114, 153, 0.06)',
+    'ui-danger': '#F85A5A',
+    'ui-slider-track': '#E3E5E7',
+    'ui-slider-fill': '#FB7299',
   },
 };
 
-/** Built-in dark theme */
+/** Built-in dark theme — bilibili 深色模式风格 */
 export const DARK_THEME: RenderTheme = {
   id: 'dark',
   name: '深色模式',
-  backgroundColor: '#1A1A1A',
-  textColor: '#D4D4D4',
-  textColorSecondary: '#6B6B6B',
-  selectionColor: 'rgba(109, 179, 242, 0.3)',
-  accentColor: '#6DB3F2',
+  backgroundColor: '#1A1A1C',
+  textColor: '#E8E8EA',
+  textColorSecondary: '#9499A0',
+  selectionColor: 'rgba(252, 140, 172, 0.25)',
+  accentColor: '#FC8CAC',
   cssVariables: {
-    'ui-background': '#252525',
-    'ui-background-secondary': '#1E1E1E',
-    'ui-text': '#D4D4D4',
-    'ui-text-secondary': '#8C8C8C',
-    'ui-border': '#3A3A3A',
-    'ui-accent': '#6DB3F2',
-    'ui-overlay': 'rgba(255, 255, 255, 0.05)',
-    'ui-danger': '#E74C3C',
-    'ui-slider-track': '#3A3A3A',
-    'ui-slider-fill': '#6DB3F2',
+    'ui-background': '#1E1E20',
+    'ui-background-secondary': '#28282C',
+    'ui-text': '#E8E8EA',
+    'ui-text-secondary': '#9499A0',
+    'ui-border': '#38383C',
+    'ui-accent': '#FC8CAC',
+    'ui-overlay': 'rgba(255, 255, 255, 0.06)',
+    'ui-danger': '#F85A5A',
+    'ui-slider-track': '#38383C',
+    'ui-slider-fill': '#FC8CAC',
   },
 };
 
-/** Built-in sepia (eye-care) theme */
+/** Built-in sepia (eye-care) theme — bilibili 品牌色 + 暖黄底 */
 export const SEPIA_THEME: RenderTheme = {
   id: 'sepia',
   name: '护眼模式',
-  backgroundColor: '#F4ECD8',
-  textColor: '#5B4636',
-  textColorSecondary: '#9C8B7E',
-  selectionColor: 'rgba(139, 115, 85, 0.3)',
-  accentColor: '#8B7355',
+  backgroundColor: '#F5F0E8',
+  textColor: '#4A4036',
+  textColorSecondary: '#8C8276',
+  selectionColor: 'rgba(251, 114, 153, 0.25)',
+  accentColor: '#FB7299',
   cssVariables: {
-    'ui-background': '#EDE0C8',
-    'ui-background-secondary': '#E3D5B8',
-    'ui-text': '#5B4636',
-    'ui-text-secondary': '#9C8B7E',
-    'ui-border': '#D4C4A8',
-    'ui-accent': '#8B7355',
-    'ui-overlay': 'rgba(139, 115, 85, 0.08)',
+    'ui-background': '#EDE8DE',
+    'ui-background-secondary': '#E3DDD2',
+    'ui-text': '#4A4036',
+    'ui-text-secondary': '#8C8276',
+    'ui-border': '#D4C9B8',
+    'ui-accent': '#FB7299',
+    'ui-overlay': 'rgba(180, 160, 140, 0.10)',
     'ui-danger': '#C0392B',
-    'ui-slider-track': '#D4C4A8',
-    'ui-slider-fill': '#8B7355',
+    'ui-slider-track': '#D4C9B8',
+    'ui-slider-fill': '#FB7299',
   },
 };
 

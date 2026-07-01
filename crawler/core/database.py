@@ -689,6 +689,54 @@ class NovelDB:
             row = cur.fetchone()
             return dict(row) if row else {"total": 0, "downloaded": 0, "pending": 0}
 
+    def get_available_filters(self) -> Dict:
+        """获取所有可用的筛选选项（状态、评级、标签）
+
+        用于前端构建筛选面板，返回所有存在于 site_novels 中的
+        状态值、标签值以及预定义的评级列表。
+
+        Returns:
+            {
+                "statuses": ["已完结", "连载中", ...],
+                "ratings": ["S", "A", "B", "C", "D"],
+                "tags": ["校园", "恋爱", "奇幻", ...],
+                "tag_suggestions": [  # 前端展示用的推荐标签
+                    {"label": "校园", "value": "校园"},
+                    {"label": "恋爱", "value": "恋爱"},
+                    ...
+                ]
+            }
+        """
+        with self._conn.cursor() as cur:
+            # 获取所有不同的状态值
+            cur.execute("""
+                SELECT DISTINCT status FROM site_novels
+                WHERE status IS NOT NULL AND status != ''
+                ORDER BY status
+            """)
+            statuses = [r["status"] for r in cur.fetchall()]
+
+            # 获取所有不同的标签（从 TEXT[] 数组中展开去重）
+            cur.execute("""
+                SELECT DISTINCT unnest(tags) AS tag FROM site_novels
+                WHERE tags IS NOT NULL AND array_length(tags, 1) > 0
+                ORDER BY tag
+            """)
+            tags = [r["tag"] for r in cur.fetchall()]
+
+        # 预定义的评级列表
+        ratings = ["S", "A", "B", "C", "D"]
+
+        # 构建前端友好的选项列表
+        tag_options = [{"label": t, "value": t} for t in tags]
+
+        return {
+            "statuses": statuses,
+            "ratings": ratings,
+            "tags": tags,
+            "tag_options": tag_options,
+        }
+
     # ─── 章节 CRUD ───
 
     def insert_chapter(self, data: Dict) -> int:

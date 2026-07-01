@@ -1,7 +1,6 @@
 /**
- * TouchLayer — Transparent overlay that captures gestures.
+ * TouchLayer — 透明触摸覆盖层，拦截所有手势事件。
  */
-
 import React, { useRef, useCallback } from 'react';
 import { useGestureDetector } from '../gestures/useGestureDetector';
 import type { TapZone } from '../gestures/types';
@@ -35,9 +34,10 @@ export const TouchLayer: React.FC<TouchLayerProps> = ({
   });
 
   return (
-    <div ref={layerRef} style={{
-      position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-      zIndex: 10, background: 'transparent', touchAction: 'none',
-    }} />
+    <div
+      ref={layerRef}
+      className="absolute inset-0 z-10 bg-transparent"
+      style={{ touchAction: 'none' }}
+    />
   );
 };

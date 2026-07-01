@@ -1,14 +1,10 @@
 /**
- * CanvasViewport — The canvas element that displays pages.
+ * CanvasViewport — Canvas 元素容器。
  *
- * Owns the <canvas> element lifecycle:
- * - Creates and sizes the canvas
- * - Exposes the canvas ref for the renderer
- * - Handles DPR scaling
- * - Reports dimensions for layout
+ * 管理 Canvas 元素生命周期：创建、尺寸同步、DPR 缩放。
+ * 通过 forwardRef 向父组件暴露 canvas 引用和当前尺寸。
  */
-
-import React, { useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
+import { useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { useCanvasResize } from '../hooks/useCanvasResize';
 import type { CanvasDimensions } from '../hooks/useCanvasResize';
 
@@ -30,11 +26,10 @@ export const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportPro
       onResize: onDimensionsChange,
     });
 
-    // Sync canvas backing store size with dimensions
+    // 同步 Canvas 物理像素尺寸
     useEffect(() => {
       const canvas = canvasRef.current;
       if (!canvas) return;
-
       if (
         canvas.width !== dimensions.physicalWidth ||
         canvas.height !== dimensions.physicalHeight
@@ -44,37 +39,17 @@ export const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportPro
       }
     }, [dimensions]);
 
-    // Expose canvas and dimensions to parent
-    useImperativeHandle(
-      ref,
-      () => ({
-        canvas: canvasRef.current,
-        dimensions,
-      }),
-      [dimensions],
-    );
+    useImperativeHandle(ref, () => ({
+      canvas: canvasRef.current,
+      dimensions,
+    }), [dimensions]);
 
     return (
-      <div
-        ref={containerRef}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          overflow: 'hidden',
-        }}
-      >
+      <div ref={containerRef} className="absolute inset-0 overflow-hidden">
         <canvas
           ref={canvasRef}
-          style={{
-            display: 'block',
-            width: '100%',
-            height: '100%',
-            // Prevent any browser touch actions on the canvas itself
-            touchAction: 'none',
-          }}
+          className="block w-full h-full"
+          style={{ touchAction: 'none' }}
         />
       </div>
     );

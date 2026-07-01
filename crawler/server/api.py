@@ -166,6 +166,28 @@ def search_catalog(
         db.close()
 
 
+@app.get("/api/catalog/filters")
+def get_filters():
+    """返回所有可用的筛选选项（标签、状态、评级）
+
+    用于前端构建筛选面板，数据来自 site_novels 表的实际值。
+    评级定义为固定的 S/A/B/C/D 五级。
+
+    返回格式：
+        {
+            "statuses": ["已完结", "连载中"],
+            "ratings": ["S", "A", "B", "C", "D"],
+            "tags": ["校园", "恋爱", ...],
+            "tag_options": [{"label": "校园", "value": "校园"}, ...]
+        }
+    """
+    db = _get_db()
+    try:
+        return db.get_available_filters()
+    finally:
+        db.close()
+
+
 @app.get("/api/books/{novel_id}/metadata")
 def get_metadata(novel_id: int):
     """返回 metadata.json 等价结构"""

@@ -41,6 +41,7 @@ import {
   clearRecoveryState,
   onPageHidden,
 } from '@/services/lifecycle';
+import { setItem } from '@/services/storage/localStorage';
 
 /** Hook 配置选项 */
 export interface UsePageLifecycleOptions {
@@ -65,35 +66,45 @@ export function usePageLifecycle({ enabled, currentPath }: UsePageLifecycleOptio
   useEffect(() => { currentPathRef.current = currentPath; }, [currentPath]);
 
   // ═══════════════════════════════════════════════════════════════
-  // 页面隐藏时保存恢复状态
+  // 页面隐藏时保存恢复状态 + 阅读进度
   // ═══════════════════════════════════════════════════════════════
 
   useEffect(() => {
     if (!enabled) return;
 
-    // 注册页面隐藏回调
     const unregister = onPageHidden(() => {
       const path = currentPathRef.current;
       if (!path) return;
 
-      // 构建恢复状态
       const readerState = useReaderStore.getState();
       const settingsState = useSettingsStore.getState();
 
-      // 如果在阅读器中，保存额外的阅读上下文
       const extra: Record<string, unknown> = {};
 
-      if (readerState.bookSource) {
+      if (readerState.bookSource && readerState.bookMetadata && readerState.chapterId) {
         extra.bookSourceType = readerState.bookSource.type;
         extra.bookSourceUri = readerState.bookSource.uri;
-        // bookId 在 bookMetadata 中（下载后才会有）
-        if (readerState.bookMetadata) {
-          extra.bookId = readerState.bookMetadata.bookId;
-        }
+        extra.bookId = readerState.bookMetadata.bookId;
         extra.chapterId = readerState.chapterId;
         extra.charOffset = readerState.currentCharOffset;
         extra.pageIndex = readerState.currentPageIndex;
         extra.readingMode = settingsState.readingMode;
+
+        // 同步保存阅读进度到 localStorage（切后台时异步 API 可能被取消）
+        // 这是关键修复：确保锁屏/切后台时阅读位置被即时持久化
+        const progress = {
+          bookId: readerState.bookMetadata.bookId,
+          chapterId: readerState.chapterId,
+          pageIndex: readerState.currentPageIndex,
+          charOffset: readerState.currentCharOffset,
+          updatedAt: Date.now(),
+        };
+        setItem(`progress:${progress.bookId}`, progress);
+
+        // 异步写入 IndexedDB（fire-and-forget，不阻塞页面隐藏）
+        import('@/services/storage/ProgressCache').then(({ saveReadingProgress }) => {
+          saveReadingProgress(progress);
+        }).catch(() => {});
       }
 
       saveRecoveryState(path, Object.keys(extra).length > 0 ? extra : undefined);
